@@ -1,0 +1,35 @@
+# `docker compose up` is a valid alternative to the manual pip-install
+# instructions in README.md. Single service on purpose: backend/api.py
+# already mounts the frontend directory and serves index.html at "/" (see
+# api.py's StaticFiles mount + FileResponse route) — there's no separate
+# static file server to run, so splitting this into two containers would add
+# operational complexity for zero benefit at this project's size.
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - DATABASE_URL=sqlite:///./data/revenue_recovery.db
+      - COOLDOWN_HOURS=24
+      - MAX_ATTEMPTS=3
+      - SAFETY_ITERATION_CAP=6
+      - LOG_LEVEL=INFO
+      - PAYMENT_EXECUTOR=mock
+    volumes:
+      # persists the SQLite DB, trained model, and structured logs across
+      # container restarts — delete this volume (or its host dirs) to force
+      # a full re-bootstrap of data + model on next `docker compose up`.
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s  # first boot bootstraps data + trains a model, which takes longer than a normal restart

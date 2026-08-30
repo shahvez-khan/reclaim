@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install -r backend/requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check backend/ ml/
+
+      - name: Generate training data + train model
+        # Tests exercise the real decision/candidate_actions pipeline, which
+        # loads a trained model at import time — it has to exist before
+        # pytest runs, same as it does for a real deployment (see
+        # docker-entrypoint.sh, which does the same thing on container start).
+        run: |
+          cd ml
+          python generate_training_data.py
+          python train_recovery_model.py
+
+      - name: Run test suite
+        run: |
+          cd backend
+          pytest tests/ -v

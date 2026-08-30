@@ -1,0 +1,15 @@
+-- Phase 1 of the feature-completion loop: fixes the discount-recovery
+-- accounting bug where a send_discount_nudge recovery recorded the FULL
+-- cart_value as recovered revenue, even though a discount nudge by
+-- construction means the customer paid less than cart_value.
+--
+-- recovered_amount is the true net amount recovered for a checkout
+-- abandonment: cart_value for any non-discount recovery, cart_value * (1 -
+-- DISCOUNT_PCT) for a discount-nudge recovery (see candidate_actions.py's
+-- DISCOUNT_PCT for the disclosed, hand-set discount rate). NULL until the
+-- record actually recovers.
+--
+-- transactions and receivables are NOT touched here — neither has a
+-- discount-style action, so their existing `amount` column already equals
+-- the true recovered amount whenever status='recovered'.
+ALTER TABLE checkout_abandonments ADD COLUMN recovered_amount REAL;

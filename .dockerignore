@@ -1,0 +1,10 @@
+data/
+models/
+logs/
+.git/
+.github/
+backend/tests/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/

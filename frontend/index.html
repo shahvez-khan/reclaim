@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reclaim</title>
+<script>
+  // Set the theme before first paint to avoid a flash of the wrong theme.
+  // Priority: explicit stored choice > OS preference > dark (existing default).
+  (function () {
+    var stored = localStorage.getItem("theme");
+    var theme = stored || (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<div class="bg-grid"></div>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="mark">R</div>
+    <div class="topbar-title">
+      <span class="eyebrow">Razorpay · AI Revenue Recovery</span>
+      <h1>Reclaim</h1>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="live-dot"></span>
+    <span class="live-label">Pipeline live</span>
+    <button id="themeToggleBtn" class="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+    <button id="runBatchBtn" class="btn-ghost">Re-run batch</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="hero-main">
+      <span class="hero-label">Total recovered</span>
+      <div class="hero-number" id="heroRecovered">₹0</div>
+      <div class="hero-sub">
+        of <span id="heroAtRisk">₹0</span> at risk ·
+        <span id="heroRate" class="rate-pill">0%</span> blended recovery rate
+      </div>
+    </div>
+    <div class="hero-split">
+      <div class="split-card">
+        <span class="split-label">Transactions</span>
+        <span class="split-value" id="txnRate">0%</span>
+        <span class="split-sub" id="txnAmounts">₹0 / ₹0</span>
+      </div>
+      <div class="split-card">
+        <span class="split-label">Receivables</span>
+        <span class="split-value" id="recvRate">0%</span>
+        <span class="split-sub" id="recvAmounts">₹0 / ₹0</span>
+      </div>
+      <div class="split-card">
+        <span class="split-label">Abandonments</span>
+        <span class="split-value" id="abandRate">0%</span>
+        <span class="split-sub" id="abandAmounts">₹0 / ₹0</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- HERO EXAMPLES -->
+  <section class="hero-examples-row" id="heroExamplesRow"></section>
+
+  <!-- STAT CHIPS -->
+  <section class="chip-row" id="chipRow"></section>
+
+  <!-- BASELINE VS AGENT -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Baseline vs. AI Agent</h2>
+      <span class="panel-sub">all three revenue-risk categories</span>
+    </div>
+    <div id="baselineCompare" class="baseline-compare">
+      <p class="loading-state">Loading comparison…</p>
+    </div>
+  </section>
+
+  <!-- TWO COLUMN: chart + guardrails -->
+  <section class="two-col">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Recovery rate by failure code</h2>
+        <span class="panel-sub">transactions only</span>
+      </div>
+      <div id="failureChart" class="bar-chart"></div>
+    </div>
+
+    <div class="panel guardrail-panel">
+      <div class="panel-head">
+        <h2>Stopping rules fired</h2>
+        <span class="panel-sub" id="stoppingTotal">0 total</span>
+      </div>
+      <div id="guardrailList" class="guardrail-list"></div>
+      <p class="guardrail-note">Every rule below blocked an automated action from firing — proof the agent doesn't spam or harass.</p>
+    </div>
+  </section>
+
+  <!-- RECORDS TABLE -->
+  <section class="panel records-panel">
+    <div class="panel-head">
+      <h2>Transactions, receivables &amp; abandonments</h2>
+    </div>
+    <div class="filter-group">
+      <div class="filter-row" id="filterRow">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="recovered">Recovered</button>
+        <button class="filter-btn" data-filter="escalated">Escalated</button>
+        <button class="filter-btn" data-filter="still_failing">In progress</button>
+        <button class="filter-btn" data-filter="stopped_no_action">Stopped</button>
+      </div>
+      <div class="filter-row" id="typeRow">
+        <button class="filter-btn active" data-type="all">All types</button>
+        <button class="filter-btn" data-type="transaction">Transactions</button>
+        <button class="filter-btn" data-type="receivable">Receivables</button>
+        <button class="filter-btn" data-type="abandonment">Abandonments</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="recordsTable">
+        <thead>
+          <tr>
+            <th>Record</th>
+            <th>Type</th>
+            <th>Detail</th>
+            <th>Amount</th>
+            <th>Action</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="recordsBody"></tbody>
+      </table>
+    </div>
+    <div id="recordsPagination" class="records-pagination"></div>
+  </section>
+
+</main>
+
+<!-- RECEIPT DRAWER (signature element) -->
+<div id="receiptOverlay" class="receipt-overlay">
+  <div id="receiptDrawer" class="receipt-drawer">
+    <button id="closeReceipt" class="receipt-close">&times;</button>
+    <div class="receipt-perf"></div>
+    <div id="receiptContent" class="receipt-content"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
