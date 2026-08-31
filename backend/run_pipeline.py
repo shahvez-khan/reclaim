@@ -38,7 +38,7 @@ from decision import run_decisions
 from execution import run_execution
 from agent_loop import run_agent_loop_for_all_transactions
 from baseline import run_baseline
-from schema import get_connection, snapshot_initial_data
+from schema import get_connection, snapshot_initial_data, get_current_batch_id
 
 PIPELINE_LOCK_PATH = Path(__file__).parent.parent / "data" / "pipeline.lock"
 
@@ -111,9 +111,15 @@ def print_combined_summary(baseline_result=None):
     conn = get_connection()
     cur = conn.cursor()
 
-    txns = cur.execute("SELECT * FROM transactions").fetchall()
-    recv = cur.execute("SELECT * FROM receivables").fetchall()
-    aband = cur.execute("SELECT * FROM checkout_abandonments").fetchall()
+    # Phase 2: scope to the CURRENT/latest batch only — the source tables are
+    # cumulative now, so an unfiltered SELECT would include every prior run's
+    # records too and this "batch summary" would silently become an
+    # all-time summary instead.
+    batch_id = get_current_batch_id(conn)
+
+    txns = cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (batch_id,)).fetchall()
+    recv = cur.execute("SELECT * FROM receivables WHERE batch_id = ?", (batch_id,)).fetchall()
+    aband = cur.execute("SELECT * FROM checkout_abandonments WHERE batch_id = ?", (batch_id,)).fetchall()
 
     def amt(r):
         return r["cart_value"] if "cart_value" in r.keys() else r["amount"]
@@ -139,7 +145,7 @@ def print_combined_summary(baseline_result=None):
     aband_total = sum(r["cart_value"] for r in aband)
     aband_recovered = sum(recovered_amt(r) for r in aband if r["status"] == "recovered")
 
-    decisions = cur.execute("SELECT * FROM decisions").fetchall()
+    decisions = cur.execute("SELECT * FROM decisions WHERE batch_id = ?", (batch_id,)).fetchall()
     latest_decision = {}
     for d in decisions:
         rid = d["record_id"]

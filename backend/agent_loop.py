@@ -22,7 +22,7 @@ decision.py / execution.py, per the priority scoping agreed with the user.
 import json
 from datetime import datetime
 
-from schema import get_connection
+from schema import get_connection, get_current_batch_id
 from decision import decide_transaction, MAX_ATTEMPTS
 from config import SAFETY_ITERATION_CAP
 from execution import execute_decision
@@ -35,7 +35,7 @@ def _row_to_dict(row):
     return {k: row[k] for k in row.keys()}
 
 
-def run_agentic_transaction(txn_row, diag_row, conn) -> dict:
+def run_agentic_transaction(txn_row, diag_row, conn, batch_id=None) -> dict:
     """Runs the full observe -> decide -> execute -> replan loop for ONE
     transaction. Persists every decision + audit event as it goes. Returns a
     small summary dict for batch-level reporting."""
@@ -57,13 +57,13 @@ def run_agentic_transaction(txn_row, diag_row, conn) -> dict:
         cur.execute(
             """INSERT INTO decisions
                (decision_id, record_id, record_type, attempt_number, action, reasoning, retry_at,
-                decided_at, stopping_rule_fired, candidate_actions, ml_selected_action)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                decided_at, stopping_rule_fired, candidate_actions, ml_selected_action, batch_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (f"dec_{decision['record_id']}_{attempt_number}", decision["record_id"], "transaction",
              attempt_number, decision["action"], decision["reasoning"], decision["retry_at"], now,
              decision["stopping_rule_fired"],
              json.dumps(decision["candidate_actions"]) if decision["candidate_actions"] else None,
-             decision["ml_selected_action"]),
+             decision["ml_selected_action"], batch_id),
         )
 
         result = execute_decision(decision, txn, now)
@@ -80,10 +80,10 @@ def run_agentic_transaction(txn_row, diag_row, conn) -> dict:
             event_type = "ACTION_EXECUTED"  # automated action taken, failed, may replan
 
         cur.execute(
-            """INSERT INTO audit_log (record_id, record_type, timestamp, event_type, action_taken, reasoning, outcome, actor)
-               VALUES (?,?,?,?,?,?,?,?)""",
+            """INSERT INTO audit_log (record_id, record_type, timestamp, event_type, action_taken, reasoning, outcome, actor, batch_id)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (decision["record_id"], "transaction", now, event_type, decision["action"],
-             decision["reasoning"], result["outcome"], result["actor"]),
+             decision["reasoning"], result["outcome"], result["actor"], batch_id),
         )
         events.append({"attempt": attempt_number, "action": decision["action"], "outcome": result["outcome"]})
 
@@ -112,11 +112,11 @@ def run_agentic_transaction(txn_row, diag_row, conn) -> dict:
         if decision["ml_selected_action"]:
             exclude_actions.add(decision["ml_selected_action"])
         cur.execute(
-            """INSERT INTO audit_log (record_id, record_type, timestamp, event_type, action_taken, reasoning, outcome, actor)
-               VALUES (?,?,?,?,?,?,?,?)""",
+            """INSERT INTO audit_log (record_id, record_type, timestamp, event_type, action_taken, reasoning, outcome, actor, batch_id)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (decision["record_id"], "transaction", now, "REPLANNED", decision["action"],
              f"{decision['action']} did not recover the payment — re-diagnosing and selecting the next best candidate action.",
-             "Replanning", "agent"),
+             "Replanning", "agent", batch_id),
         )
         attempt_number += 1
 
@@ -127,15 +127,19 @@ def run_agent_loop_for_all_transactions():
     conn = get_connection()
     cur = conn.cursor()
 
-    diag_by_id = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses").fetchall()}
-    cur.execute("DELETE FROM decisions WHERE record_type = 'transaction'")
-    cur.execute("DELETE FROM audit_log WHERE record_type = 'transaction'")
+    # Phase 2: operate only on the CURRENT/latest batch's transactions — old
+    # batches' decisions/audit_log rows must persist untouched.
+    batch_id = get_current_batch_id(conn)
 
-    txn_rows = cur.execute("SELECT * FROM transactions").fetchall()
+    diag_by_id = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses WHERE batch_id = ?", (batch_id,)).fetchall()}
+    cur.execute("DELETE FROM decisions WHERE record_type = 'transaction' AND batch_id = ?", (batch_id,))
+    cur.execute("DELETE FROM audit_log WHERE record_type = 'transaction' AND batch_id = ?", (batch_id,))
+
+    txn_rows = cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (batch_id,)).fetchall()
     results = []
     for row in txn_rows:
         diag = diag_by_id[row["transaction_id"]]
-        results.append(run_agentic_transaction(row, diag, conn))
+        results.append(run_agentic_transaction(row, diag, conn, batch_id=batch_id))
 
     conn.commit()
 

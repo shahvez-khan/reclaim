@@ -3,9 +3,13 @@ Loop 5: API layer for the dashboard.
 
 Serves:
   GET  /api/summary                -> KPIs, bucket counts, failure_code breakdown, stopping-rule counts
+                                       (optional ?batch_id=; default: latest — Phase 2)
   GET  /api/records?status=&type=  -> filterable list of transactions/receivables/abandonments with decision/outcome
+                                       (optional &batch_id=; default: latest — Phase 2)
   GET  /api/audit/{record_id}      -> full chain: diagnosis -> decision -> execution/audit log
-  POST /api/run-batch              -> re-runs the whole pipeline fresh (rate-limited — see below)
+  GET  /api/batches                -> every pipeline run ever executed, newest first, with record counts (Phase 2)
+  POST /api/run-batch              -> re-runs the whole pipeline fresh (rate-limited — see below); ADDITIVE
+                                       since Phase 2 — creates a new batch, does not delete prior ones
   GET  /api/health                 -> liveness + DB connectivity check, for a load balancer/uptime monitor
   GET  /                           -> static dashboard
 
@@ -37,7 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from schema import get_connection
+from schema import get_connection, get_current_batch_id, list_batches
 from logging_config import configure_logging
 from config import RUN_BATCH_RATE_LIMIT_MAX, RUN_BATCH_RATE_LIMIT_WINDOW_SECONDS
 
@@ -105,14 +109,30 @@ def _rate_limit_run_batch():
     _run_batch_calls.append(now)
 
 
-def _latest_decisions(cur):
+def _latest_decisions(cur, batch_id):
     """Multiple decisions can now exist per record (agent re-plan attempts) —
     always use the LATEST one (highest attempt_number) as the record's
-    current/final decision for bucketing and summary purposes."""
+    current/final decision for bucketing and summary purposes. Scoped to one
+    batch (Phase 2) since decisions now accumulate across every run ever."""
     latest = {}
-    for d in cur.execute("SELECT * FROM decisions ORDER BY attempt_number").fetchall():
+    for d in cur.execute("SELECT * FROM decisions WHERE batch_id = ? ORDER BY attempt_number", (batch_id,)).fetchall():
         latest[d["record_id"]] = d  # later attempt_number overwrites earlier, since ordered ascending
     return latest
+
+
+def _resolve_batch_id(cur, batch_id: str | None) -> str:
+    """Phase 2: every batch-aware endpoint accepts an optional ?batch_id=
+    query param (default: latest). Validates it against the batches table so
+    a typo'd/unknown batch_id gets a proper 404, not a silently-empty result."""
+    if batch_id is None:
+        resolved = get_current_batch_id(cur)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail="No batch has been generated yet — run POST /api/run-batch first.")
+        return resolved
+    row = cur.execute("SELECT 1 FROM batches WHERE batch_id = ?", (batch_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown batch_id: {batch_id!r}")
+    return batch_id
 
 
 def _bucket_for(record_status, dec):
@@ -140,16 +160,30 @@ def health():
         raise HTTPException(status_code=503, detail="database unreachable")
 
 
+@app.get("/api/batches")
+def get_batches():
+    """Phase 2: lists every pipeline run ever executed against this DB,
+    newest first, with its per-category record counts — backs the
+    dashboard's batch-history dropdown. See schema.list_batches()."""
+    conn = get_connection()
+    batches = list_batches(conn)
+    current = get_current_batch_id(conn)
+    conn.close()
+    return {"batches": batches, "current_batch_id": current}
+
+
 @app.get("/api/summary")
-def get_summary():
+def get_summary(batch_id: str | None = None):
     conn = get_connection()
     cur = conn.cursor()
 
-    txns = cur.execute("SELECT * FROM transactions").fetchall()
-    recv = cur.execute("SELECT * FROM receivables").fetchall()
-    aband = cur.execute("SELECT * FROM checkout_abandonments").fetchall()
-    decisions = _latest_decisions(cur)
-    diagnoses = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses").fetchall()}
+    resolved_batch = _resolve_batch_id(cur, batch_id)
+
+    txns = cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (resolved_batch,)).fetchall()
+    recv = cur.execute("SELECT * FROM receivables WHERE batch_id = ?", (resolved_batch,)).fetchall()
+    aband = cur.execute("SELECT * FROM checkout_abandonments WHERE batch_id = ?", (resolved_batch,)).fetchall()
+    decisions = _latest_decisions(cur, resolved_batch)
+    diagnoses = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses WHERE batch_id = ?", (resolved_batch,)).fetchall()}
 
     def amt(r):
         return r["cart_value"] if "cart_value" in r.keys() else r["amount"]
@@ -212,11 +246,12 @@ def get_summary():
 
     manual_followup_count = sum(1 for d in diagnoses.values() if d["needs_manual_followup"])
     replanned_count = len({d["record_id"] for d in cur.execute(
-        "SELECT record_id FROM decisions WHERE attempt_number > 1").fetchall()})
+        "SELECT record_id FROM decisions WHERE batch_id = ? AND attempt_number > 1", (resolved_batch,)).fetchall()})
 
     conn.close()
 
     return {
+        "batch_id": resolved_batch,
         "total_records": len(all_records),
         "total_at_risk": total_amount,
         "total_recovered": recovered_amount,
@@ -241,7 +276,7 @@ def get_summary():
 
 
 @app.get("/api/records")
-def get_records(status: str | None = None, record_type: str | None = None):
+def get_records(status: str | None = None, record_type: str | None = None, batch_id: str | None = None):
     # Request validation (Phase 4.3): reject malformed filter values with a
     # proper 400 instead of silently returning an empty/wrong result set.
     if status is not None and status not in VALID_STATUSES:
@@ -251,13 +286,14 @@ def get_records(status: str | None = None, record_type: str | None = None):
 
     conn = get_connection()
     cur = conn.cursor()
-    decisions = _latest_decisions(cur)
-    diagnoses = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses").fetchall()}
+    resolved_batch = _resolve_batch_id(cur, batch_id)
+    decisions = _latest_decisions(cur, resolved_batch)
+    diagnoses = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses WHERE batch_id = ?", (resolved_batch,)).fetchall()}
 
     results = []
 
     if record_type is None or record_type == "transaction":
-        for r in cur.execute("SELECT * FROM transactions").fetchall():
+        for r in cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (resolved_batch,)).fetchall():
             dec = decisions.get(r["transaction_id"])
             diag = diagnoses.get(r["transaction_id"])
             bucket = _bucket_for(r["status"], dec)
@@ -280,7 +316,7 @@ def get_records(status: str | None = None, record_type: str | None = None):
             })
 
     if record_type is None or record_type == "receivable":
-        for r in cur.execute("SELECT * FROM receivables").fetchall():
+        for r in cur.execute("SELECT * FROM receivables WHERE batch_id = ?", (resolved_batch,)).fetchall():
             dec = decisions.get(r["invoice_id"])
             diag = diagnoses.get(r["invoice_id"])
             bucket = _bucket_for(r["status"], dec)
@@ -303,7 +339,7 @@ def get_records(status: str | None = None, record_type: str | None = None):
             })
 
     if record_type is None or record_type == "abandonment":
-        for r in cur.execute("SELECT * FROM checkout_abandonments").fetchall():
+        for r in cur.execute("SELECT * FROM checkout_abandonments WHERE batch_id = ?", (resolved_batch,)).fetchall():
             dec = decisions.get(r["session_id"])
             diag = diagnoses.get(r["session_id"])
             bucket = _bucket_for(r["status"], dec)
@@ -376,12 +412,16 @@ class RunBatchResponse(BaseModel):
     status: str
     message: str
     run_id: str
+    batch_id: str | None = None
 
 
 @app.post("/api/run-batch", response_model=RunBatchResponse)
 def run_batch():
     """Re-runs the entire pipeline fresh: data -> diagnosis -> agent loop
-    (transactions) -> decision+execution (receivables + abandonments)."""
+    (transactions) -> decision+execution (receivables + abandonments).
+    Phase 2: this is now ADDITIVE — it creates a new batch_id and tags every
+    row it generates with it; prior batches' data is untouched and remains
+    independently queryable via GET /api/batches and ?batch_id=."""
     _rate_limit_run_batch()
 
     run_id = uuid.uuid4().hex[:12]
@@ -398,14 +438,36 @@ def run_batch():
         logger.error("run_batch_failed", extra={"run_id": run_id, "returncode": result.returncode})
         raise HTTPException(status_code=500, detail=f"run_pipeline.py failed: {result.stderr[-2000:]}")
 
-    logger.info("run_batch_completed", extra={"run_id": run_id})
-    return RunBatchResponse(status="ok", message="Batch re-run complete.", run_id=run_id)
+    conn = get_connection()
+    new_batch_id = get_current_batch_id(conn)
+    conn.close()
+
+    logger.info("run_batch_completed", extra={"run_id": run_id, "batch_id": new_batch_id})
+    return RunBatchResponse(status="ok", message="Batch re-run complete.", run_id=run_id, batch_id=new_batch_id)
 
 
 @app.get("/api/baseline")
-def get_baseline_comparison():
+def get_baseline_comparison(batch_id: str | None = None):
     conn = get_connection()
     cur = conn.cursor()
+
+    # baseline_results/the snapshot tables are deliberately NOT durable across
+    # batches (Phase 2 — see schema.py's comment above transactions_snapshot):
+    # they always reflect only the CURRENT/latest run. So an explicit
+    # batch_id here can only ever be the current one — anything else means
+    # "give me the baseline comparison for an old run", which this project
+    # honestly doesn't retain, rather than silently substituting the wrong
+    # numbers.
+    current_batch = _resolve_batch_id(cur, None)
+    if batch_id is not None and batch_id != current_batch:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Baseline comparison is only available for the current/latest batch "
+                f"({current_batch!r}) — it is recomputed fresh each run and not retained "
+                "per historical batch. Omit batch_id (or pass the current one) to get it."
+            ),
+        )
 
     def slice_for(record_type: str, eligible_threshold: int = 100):
         row = cur.execute(
@@ -425,11 +487,18 @@ def get_baseline_comparison():
     recv_n, recv_eligible, recv_baseline = slice_for("receivable")
     aband_n, aband_eligible, aband_baseline = slice_for("abandonment")
 
-    txn_agent = cur.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE status='recovered'").fetchone()[0]
-    recv_agent = cur.execute("SELECT COALESCE(SUM(amount),0) FROM receivables WHERE status='recovered'").fetchone()[0]
+    txn_agent = cur.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE batch_id = ? AND status='recovered'", (current_batch,)
+    ).fetchone()[0]
+    recv_agent = cur.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM receivables WHERE batch_id = ? AND status='recovered'", (current_batch,)
+    ).fetchone()[0]
     # recovered_amount (not cart_value) — a discount-nudge recovery pays less
     # than cart_value; see Phase 1 discount-accounting fix.
-    aband_agent = cur.execute("SELECT COALESCE(SUM(recovered_amount),0) FROM checkout_abandonments WHERE status='recovered'").fetchone()[0]
+    aband_agent = cur.execute(
+        "SELECT COALESCE(SUM(recovered_amount),0) FROM checkout_abandonments WHERE batch_id = ? AND status='recovered'",
+        (current_batch,),
+    ).fetchone()[0]
 
     conn.close()
 
@@ -447,6 +516,7 @@ def get_baseline_comparison():
         return d
 
     return {
+        "batch_id": current_batch,
         "transactions": compare(txn_n, txn_eligible, txn_baseline, txn_agent),
         "receivables": compare(
             recv_n, recv_eligible, recv_baseline, recv_agent,
@@ -462,29 +532,35 @@ def get_baseline_comparison():
 
 
 @app.get("/api/hero-examples")
-def get_hero_examples():
+def get_hero_examples(batch_id: str | None = None):
     """Three curated, always-fresh examples for a live walkthrough — re-derived
-    from whatever the current batch run actually produced, so these never go
-    stale after a re-run."""
+    from whatever the CURRENT/latest batch run actually produced (Phase 2:
+    scoped like every other batch-aware endpoint — see _resolve_batch_id —
+    so re-running the pipeline doesn't leave a stale example from an old
+    batch mixed in with current-batch summary numbers)."""
     conn = get_connection()
     cur = conn.cursor()
+    resolved_batch = _resolve_batch_id(cur, batch_id)
 
     retry_success = cur.execute("""
         SELECT d.record_id FROM decisions d
-        WHERE d.record_type='transaction' AND d.attempt_number >= 2
-        AND EXISTS (SELECT 1 FROM audit_log a WHERE a.record_id=d.record_id AND a.event_type='RECOVERY_SUCCESS')
+        WHERE d.batch_id = ? AND d.record_type='transaction' AND d.attempt_number >= 2
+        AND EXISTS (SELECT 1 FROM audit_log a WHERE a.record_id=d.record_id AND a.batch_id = ? AND a.event_type='RECOVERY_SUCCESS')
         LIMIT 1
-    """).fetchone()
+    """, (resolved_batch, resolved_batch)).fetchone()
 
     risk_escalated = cur.execute("""
-        SELECT record_id FROM decisions WHERE stopping_rule_fired='risk_flag' LIMIT 1
-    """).fetchone()
+        SELECT record_id FROM decisions WHERE batch_id = ? AND stopping_rule_fired='risk_flag' LIMIT 1
+    """, (resolved_batch,)).fetchone()
 
     max_attempts = cur.execute("""
-        SELECT record_id FROM decisions WHERE stopping_rule_fired='max_attempts' AND attempt_number >= 3 LIMIT 1
-    """).fetchone()
+        SELECT record_id FROM decisions WHERE batch_id = ? AND stopping_rule_fired='max_attempts' AND attempt_number >= 3 LIMIT 1
+    """, (resolved_batch,)).fetchone()
     if not max_attempts:
-        max_attempts = cur.execute("SELECT record_id FROM decisions WHERE stopping_rule_fired='max_attempts' LIMIT 1").fetchone()
+        max_attempts = cur.execute(
+            "SELECT record_id FROM decisions WHERE batch_id = ? AND stopping_rule_fired='max_attempts' LIMIT 1",
+            (resolved_batch,),
+        ).fetchone()
 
     conn.close()
 

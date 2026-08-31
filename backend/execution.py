@@ -46,7 +46,7 @@ import random
 from datetime import datetime
 from typing import Protocol
 
-from schema import get_connection
+from schema import get_connection, get_current_batch_id
 from config import RAZORPAY_API_KEY, RAZORPAY_WEBHOOK_SECRET, PAYMENT_EXECUTOR
 from candidate_actions import DISCOUNT_PCT
 
@@ -298,12 +298,20 @@ def run_execution(types=("transaction", "receivable", "abandonment")):
     cur = conn.cursor()
     now = datetime.now().isoformat(timespec="seconds")
 
-    txn_by_id = {r["transaction_id"]: r for r in cur.execute("SELECT * FROM transactions").fetchall()}
-    inv_by_id = {r["invoice_id"]: r for r in cur.execute("SELECT * FROM receivables").fetchall()}
-    ab_by_id = {r["session_id"]: r for r in cur.execute("SELECT * FROM checkout_abandonments").fetchall()}
-    decisions = [d for d in cur.execute("SELECT * FROM decisions").fetchall() if d["record_type"] in types]
+    # Phase 2: operate only on the CURRENT/latest batch — re-running the
+    # pipeline must not re-execute (or touch the audit_log/record status of)
+    # already-settled prior batches.
+    batch_id = get_current_batch_id(conn)
 
-    cur.execute("DELETE FROM audit_log WHERE record_type IN ({})".format(",".join("?" * len(types))), types)
+    txn_by_id = {r["transaction_id"]: r for r in cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (batch_id,)).fetchall()}
+    inv_by_id = {r["invoice_id"]: r for r in cur.execute("SELECT * FROM receivables WHERE batch_id = ?", (batch_id,)).fetchall()}
+    ab_by_id = {r["session_id"]: r for r in cur.execute("SELECT * FROM checkout_abandonments WHERE batch_id = ?", (batch_id,)).fetchall()}
+    decisions = [d for d in cur.execute("SELECT * FROM decisions WHERE batch_id = ?", (batch_id,)).fetchall() if d["record_type"] in types]
+
+    cur.execute(
+        "DELETE FROM audit_log WHERE batch_id = ? AND record_type IN ({})".format(",".join("?" * len(types))),
+        (batch_id, *types),
+    )
 
     # bucket counters for the consistency check
     bucket_counts = {"recovered": 0, "escalated": 0, "still_failing": 0, "stopped_no_action": 0}
@@ -317,6 +325,7 @@ def run_execution(types=("transaction", "receivable", "abandonment")):
     aband_total = aband_recovered = 0.0
 
     audit_rows = []
+
 
     for d in decisions:
         record = txn_by_id.get(d["record_id"]) or inv_by_id.get(d["record_id"]) or ab_by_id.get(d["record_id"])
@@ -387,12 +396,12 @@ def run_execution(types=("transaction", "receivable", "abandonment")):
             )
 
         audit_rows.append((
-            d["record_id"], record_type, now, action, result["reasoning"], result["outcome"], result["actor"],
+            d["record_id"], record_type, now, action, result["reasoning"], result["outcome"], result["actor"], batch_id,
         ))
 
     cur.executemany(
-        """INSERT INTO audit_log (record_id, record_type, timestamp, action_taken, reasoning, outcome, actor)
-           VALUES (?,?,?,?,?,?,?)""",
+        """INSERT INTO audit_log (record_id, record_type, timestamp, action_taken, reasoning, outcome, actor, batch_id)
+           VALUES (?,?,?,?,?,?,?,?)""",
         audit_rows,
     )
     conn.commit()

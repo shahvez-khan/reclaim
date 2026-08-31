@@ -53,43 +53,43 @@ class AlwaysRecoversExecutor:
                 "follow_up_payment_received": True}
 
 
-def _seed_abandonments(conn):
+def _seed_abandonments(conn, batch_id):
     now = datetime.now().isoformat(timespec="seconds")
     # No discount: plain cart-recovery link, cart value under the discount
     # gate's minimum anyway (see candidate_actions.DISCOUNT_NUDGE_MIN_CART_VALUE).
     conn.execute(
         """INSERT INTO checkout_abandonments (session_id, customer_id, cart_value, abandoned_at,
-           payment_attempted, customer_opt_out, attempt_count, last_action_timestamp, status)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        ("sess_discount_test_plain", "cust_discount_test", 1500.0, now, 0, 0, 0, None, "open"),
+           payment_attempted, customer_opt_out, attempt_count, last_action_timestamp, status, batch_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        ("sess_discount_test_plain", "cust_discount_test", 1500.0, now, 0, 0, 0, None, "open", batch_id),
     )
     # Discount-eligible: cart value above DISCOUNT_NUDGE_MIN_CART_VALUE.
     conn.execute(
         """INSERT INTO checkout_abandonments (session_id, customer_id, cart_value, abandoned_at,
-           payment_attempted, customer_opt_out, attempt_count, last_action_timestamp, status)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        ("sess_discount_test_discounted", "cust_discount_test", 5000.0, now, 0, 0, 1, None, "open"),
+           payment_attempted, customer_opt_out, attempt_count, last_action_timestamp, status, batch_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        ("sess_discount_test_discounted", "cust_discount_test", 5000.0, now, 0, 0, 1, None, "open", batch_id),
     )
     for rid in ("sess_discount_test_plain", "sess_discount_test_discounted"):
         conn.execute(
             """INSERT INTO diagnoses (record_id, record_type, root_cause, confidence, risk_flag,
-               needs_manual_followup, recommended_urgency, diagnosed_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (rid, "abandonment", "test root cause", 0.8, 0, 0, "within_24h", now),
+               needs_manual_followup, recommended_urgency, diagnosed_at, batch_id)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (rid, "abandonment", "test root cause", 0.8, 0, 0, "within_24h", now, batch_id),
         )
     # Decisions inserted directly (bypassing candidate scoring — this test is
     # about execution-time accounting, not candidate selection).
     conn.execute(
         """INSERT INTO decisions (decision_id, record_id, record_type, attempt_number, action,
-           reasoning, decided_at) VALUES (?,?,?,?,?,?,?)""",
+           reasoning, decided_at, batch_id) VALUES (?,?,?,?,?,?,?,?)""",
         ("dec_discount_test_plain", "sess_discount_test_plain", "abandonment", 1,
-         "send_cart_recovery_link", "test reasoning", now),
+         "send_cart_recovery_link", "test reasoning", now, batch_id),
     )
     conn.execute(
         """INSERT INTO decisions (decision_id, record_id, record_type, attempt_number, action,
-           reasoning, decided_at) VALUES (?,?,?,?,?,?,?)""",
+           reasoning, decided_at, batch_id) VALUES (?,?,?,?,?,?,?,?)""",
         ("dec_discount_test_discounted", "sess_discount_test_discounted", "abandonment", 1,
-         "send_discount_nudge", "test reasoning", now),
+         "send_discount_nudge", "test reasoning", now, batch_id),
     )
     conn.commit()
 
@@ -115,7 +115,9 @@ def test_discount_nudge_recovery_is_net_of_discount():
         execution._executor = AlwaysRecoversExecutor()
         try:
             conn = schema.get_connection()
-            _seed_abandonments(conn)
+            batch_id = schema.create_batch(conn, {"transactions": 0, "receivables": 0, "checkout_abandonments": 2})
+            conn.commit()
+            _seed_abandonments(conn, batch_id)
 
             execution.run_execution(types=("abandonment",))
 

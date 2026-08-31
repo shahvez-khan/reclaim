@@ -14,7 +14,7 @@ decision/execution stages.
 import json
 from datetime import datetime, timedelta
 
-from schema import get_connection
+from schema import get_connection, get_current_batch_id
 
 FAILURE_ROOT_CAUSE = {
     "insufficient_funds": "Customer's account did not have enough balance at the time of the charge.",
@@ -217,28 +217,34 @@ def run_diagnosis():
     cur = conn.cursor()
     now = datetime.now().isoformat(timespec="seconds")
 
+    # Phase 2: operate only on the CURRENT/latest batch — old batches' records
+    # were already diagnosed when they were current, and must not be
+    # re-diagnosed (or have their diagnoses touched) by a later run.
+    batch_id = get_current_batch_id(conn)
+
     diagnoses = []
 
-    for row in cur.execute("SELECT * FROM transactions").fetchall():
+    for row in cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (batch_id,)).fetchall():
         d = diagnose_transaction(row)
         diagnoses.append(d)
 
-    for row in cur.execute("SELECT * FROM receivables").fetchall():
+    for row in cur.execute("SELECT * FROM receivables WHERE batch_id = ?", (batch_id,)).fetchall():
         d = diagnose_receivable(row)
         diagnoses.append(d)
 
-    for row in cur.execute("SELECT * FROM checkout_abandonments").fetchall():
+    for row in cur.execute("SELECT * FROM checkout_abandonments WHERE batch_id = ?", (batch_id,)).fetchall():
         d = diagnose_abandonment(row)
         diagnoses.append(d)
 
-    cur.execute("DELETE FROM diagnoses")  # idempotent re-run
+    # idempotent re-run WITHIN this batch only — never touches other batches' diagnoses
+    cur.execute("DELETE FROM diagnoses WHERE batch_id = ?", (batch_id,))
     cur.executemany(
         """INSERT INTO diagnoses
-           (record_id, record_type, root_cause, confidence, risk_flag, needs_manual_followup, recommended_urgency, diagnosed_at)
-           VALUES (?,?,?,?,?,?,?,?)""",
+           (record_id, record_type, root_cause, confidence, risk_flag, needs_manual_followup, recommended_urgency, diagnosed_at, batch_id)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
         [
             (d["record_id"], d["record_type"], d["root_cause"], d["confidence"],
-             int(d["risk_flag"]), int(d["needs_manual_followup"]), d["recommended_urgency"], now)
+             int(d["risk_flag"]), int(d["needs_manual_followup"]), d["recommended_urgency"], now, batch_id)
             for d in diagnoses
         ],
     )
@@ -265,7 +271,7 @@ def run_diagnosis():
     # Pick a spread: one of each interesting case if possible
     examples = []
     seen_codes = set()
-    txn_rows = {r["transaction_id"]: r for r in cur.execute("SELECT * FROM transactions").fetchall()}
+    txn_rows = {r["transaction_id"]: r for r in cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (batch_id,)).fetchall()}
     for d in diagnoses:
         if d["record_type"] == "transaction":
             code = txn_rows[d["record_id"]]["failure_code"]

@@ -161,6 +161,8 @@ Two separate logs exist for two separate audiences: the CLI's `print()` narratio
 - **`test_agent_loop_termination.py`** — forces every automated attempt to fail (worst case) against a real temp SQLite DB and the real trained model, and asserts the loop always terminates at or before `SAFETY_ITERATION_CAP`, with a terminal decision (escalate or stop), never left hanging.
 - **`test_pipeline_invariant.py`** — runs the full pipeline end-to-end on an isolated temp DB and asserts the consistency invariant holds for all three categories, with every record receiving some decision (none silently skipped).
 - **`test_stopping_rule_coverage.py`** — regression test for the `candidates_exhausted` fix described above: asserts no `escalate_to_human` decision ever has a null `stopping_rule_fired`, and that `bucket_counts["escalated"]` always reconciles exactly with the sum of `risk_flag` + `max_attempts` + `candidates_exhausted` in `stopping_rule_breakdown` on the live project DB.
+- **`test_discount_recovery_accounting.py`** — regression test for the discount-recovery accounting fix: a `send_discount_nudge` recovery must record `recovered_amount = cart_value * (1 - DISCOUNT_PCT)`, strictly less than gross `cart_value`; a non-discount recovery must record `recovered_amount == cart_value`. Confirmed to fail against the pre-fix logic.
+- **`test_batch_durability.py`** — regression test for the durable-audit-trail fix: runs the full pipeline twice against one isolated DB and asserts every table's rows are additive (not replaced), the two batches are mutually untouched, and `get_current_batch_id()` resolves to the latest run. Confirmed to fail against the pre-fix `schema.init_db(reset=True)`-per-run behavior.
 
 Runs on every push via GitHub Actions (`.github/workflows/ci.yml`): install deps, `ruff check`, train the model fresh, run the full suite.
 
@@ -171,6 +173,7 @@ What's hardened, from the production-readiness pass on top of the original hacka
 - **Config**: everything a real deployment would need to change (DB path, ports, cooldown hours, max attempts, model paths, rate limits) lives in environment variables via `backend/config.py` / `.env.example` — nothing hardcoded.
 - **API**: request validation (proper 4xx on malformed filters), consistent structured JSON error responses, in-memory rate limiting on `/api/run-batch`, `/api/health` for a load balancer/uptime monitor.
 - **Idempotency**: a file-based run-lock (`run_pipeline.py`) prevents two pipeline runs (e.g. two concurrent `/api/run-batch` calls) from double-processing the same records — verified with an actual concurrent-subprocess test, second run correctly rejected with a 409.
+- **Durable audit trail**: every pipeline run mints a `batch_id` and tags every record/diagnosis/decision/audit-log row it creates with it (`backend/migrations/0003_batch_id.sql`). A "Re-run batch" click no longer calls `schema.init_db(reset=True)` on the live DB and erases prior runs — it's additive: old batches persist untouched and stay independently queryable (`GET /api/batches`, and `?batch_id=` on `/api/summary`, `/api/records`, `/api/hero-examples`; the dashboard's batch-history dropdown drives this). `/api/baseline` is the one deliberate exception — the baseline-vs-agent comparison is recomputed fresh from a scratch snapshot each run and was never meant to be durable per-batch, so it only serves the current/latest batch and returns a clear 400 if asked for an older one, rather than silently substituting the wrong numbers. Regression-tested in `test_batch_durability.py` (two full pipeline runs against one DB; asserts row counts are additive, batches are mutually untouched, and `get_current_batch_id()` resolves to the latest run).
 - **Logging**: structured JSON audit logs to `logs/revenue_recovery.jsonl`, separate from the CLI's demo narration.
 - **Testing**: see above — all three suites verified passing, including an exhaustive policy-order sweep and a forced-worst-case loop-termination test.
 - **Mock/real execution boundary**: `execution.py`'s `PaymentExecutor` protocol makes the mock/real seam explicit — `MockExecutor` (the only one actually used) vs. a deliberately unimplemented `RazorpayExecutor` stub documenting exactly what a real integration would need (API key, webhook signature verification, and a note that real gateway retries are async/webhook-driven, not synchronous like the mock — a bigger refactor than swapping the class in).
@@ -187,7 +190,7 @@ Dark navy/blue, Razorpay-adjacent. Shows: total recovered (hero number), transac
 
 ## Demo
 
-Click **Re-run batch** to regenerate the dataset and run the full pipeline live (data → diagnosis → agent loop → decision/execution for receivables + abandonments → baseline, ~10-20 seconds). Click any of the three **hero example** cards at the top for a guided walkthrough of re-planning, risk escalation, and max-attempts stopping — these are re-derived fresh from whatever the current run actually produced, so they never go stale.
+Click **Re-run batch** to generate a fresh batch of data and run the full pipeline live (data → diagnosis → agent loop → decision/execution for receivables + abandonments → baseline, ~10-20 seconds). Each run is **additive**, not destructive — see "Durable audit trail" below — so re-running never erases what a previous run did. Use the **batch-history dropdown** in the header to switch between any past run and inspect its numbers and audit trail independently; the dashboard defaults to showing the latest batch. Click any of the three **hero example** cards at the top for a guided walkthrough of re-planning, risk escalation, and max-attempts stopping — these are re-derived fresh from whatever the currently-viewed batch actually produced.
 
 ## Installation
 
@@ -197,8 +200,8 @@ cd backend
 pip install -r requirements.txt        # fastapi, uvicorn, scikit-learn, pandas, joblib, pydantic, python-dotenv
 pip install -r requirements-dev.txt    # pytest, ruff, sqlalchemy (dev/test only)
 cp ../.env.example ../.env             # optional — sane defaults work without it
-python3 migrate.py                     # or: python3 -c "from schema import init_db; init_db(reset=True)"
-python3 generate_data.py
+python3 migrate.py                     # or, first-time-only: python3 -c "from schema import init_db; init_db(reset=True)"
+python3 generate_data.py               # additive — safe to re-run; each call mints a new batch, never deletes prior ones
 cd ../ml && python3 generate_training_data.py && python3 train_recovery_model.py && cd ../backend
 python3 run_pipeline.py                # full batch run: data → diagnosis → agent loop → decisions → baseline
 python3 -m uvicorn api:app --host 0.0.0.0 --port 8000

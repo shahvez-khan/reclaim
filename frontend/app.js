@@ -37,15 +37,57 @@ const ACTION_SHORT_LABELS = {
 
 let currentFilter = "all";
 let currentType = "all";
+let currentBatchId = null;  // null = not yet resolved; set to a concrete batch_id once /api/batches loads
 let allRecords = [];   // full filtered result from the API, kept in memory for client-side pagination
 let currentPage = 1;
 const RECORDS_PAGE_SIZE = 50;
 
+function fmtBatchLabel(b) {
+  const d = new Date(b.created_at);
+  const when = isNaN(d) ? b.created_at : d.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+  const c = b.record_counts || {};
+  const total = (c.transactions || 0) + (c.receivables || 0) + (c.checkout_abandonments || 0);
+  return `${when} · ${total} records`;
+}
+
+async function loadBatches() {
+  const select = document.getElementById("batchSelect");
+  try {
+    const res = await fetch(`${API}/api/batches`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.batches || data.batches.length === 0) {
+      select.innerHTML = `<option value="">No batches yet</option>`;
+      select.disabled = true;
+      return;
+    }
+    currentBatchId = currentBatchId || data.current_batch_id;
+    select.innerHTML = data.batches.map(b => `
+      <option value="${escapeHtml(b.batch_id)}" ${b.batch_id === currentBatchId ? "selected" : ""}>
+        ${b.batch_id === data.current_batch_id ? "● " : ""}${escapeHtml(fmtBatchLabel(b))}
+      </option>
+    `).join("");
+    select.disabled = false;
+  } catch (err) {
+    console.error("Failed to load batches:", err);
+    select.innerHTML = `<option value="">Couldn't load batches</option>`;
+  }
+}
+
+document.getElementById("batchSelect").addEventListener("change", async (e) => {
+  currentBatchId = e.target.value;
+  await loadSummary();
+  await loadRecords(currentFilter, currentType);
+  await loadHeroExamples();
+});
+
 async function loadSummary() {
   try {
-    const res = await fetch(`${API}/api/summary`);
+    const qs = currentBatchId ? `?batch_id=${encodeURIComponent(currentBatchId)}` : "";
+    const res = await fetch(`${API}/api/summary${qs}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const s = await res.json();
+    currentBatchId = s.batch_id;  // keep the dropdown and every subsequent fetch pinned to the batch actually shown
 
     document.getElementById("heroRecovered").textContent = fmtINR(s.total_recovered);
     document.getElementById("heroAtRisk").textContent = fmtINR(s.total_at_risk);
@@ -72,7 +114,16 @@ async function loadSummary() {
 async function loadBaselineComparison() {
   const el = document.getElementById("baselineCompare");
   try {
-    const res = await fetch(`${API}/api/baseline`);
+    const qs = currentBatchId ? `?batch_id=${encodeURIComponent(currentBatchId)}` : "";
+    const res = await fetch(`${API}/api/baseline${qs}`);
+    if (res.status === 400) {
+      // Baseline comparison is only computed fresh for the current/latest
+      // batch (see api.py's get_baseline_comparison) — not an error, just
+      // not available for a historical batch someone's browsing via the
+      // batch-history dropdown.
+      el.innerHTML = `<p class="loading-state">Baseline comparison is only available for the latest batch — this is a historical run.</p>`;
+      return;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const b = await res.json();
     const categories = [
@@ -190,6 +241,7 @@ async function loadRecords(statusFilter = currentFilter, typeFilter = currentTyp
   const params = new URLSearchParams();
   if (statusFilter !== "all") params.set("status", statusFilter);
   if (typeFilter !== "all") params.set("record_type", typeFilter);
+  if (currentBatchId) params.set("batch_id", currentBatchId);
   const qs = params.toString() ? `?${params.toString()}` : "";
 
   try {
@@ -378,7 +430,10 @@ document.getElementById("runBatchBtn").addEventListener("click", async (e) => {
   btn.disabled = true;
   btn.textContent = "Running…";
   try {
-    await fetch(`${API}/api/run-batch`, { method: "POST" });
+    const res = await fetch(`${API}/api/run-batch`, { method: "POST" });
+    const data = await res.json();
+    currentBatchId = data.batch_id || null;  // pin the dashboard to the freshly-created batch
+    await loadBatches();
     await loadSummary();
     await loadRecords(currentFilter);
     await loadHeroExamples();
@@ -390,7 +445,8 @@ document.getElementById("runBatchBtn").addEventListener("click", async (e) => {
 });
 
 async function loadHeroExamples() {
-  const res = await fetch(`${API}/api/hero-examples`);
+  const qs = currentBatchId ? `?batch_id=${encodeURIComponent(currentBatchId)}` : "";
+  const res = await fetch(`${API}/api/hero-examples${qs}`);
   const examples = await res.json();
   const el = document.getElementById("heroExamplesRow");
   if (examples.length === 0) { el.innerHTML = ""; return; }
@@ -408,6 +464,9 @@ async function loadHeroExamples() {
   });
 }
 
-loadSummary();
-loadRecords();
-loadHeroExamples();
+(async function init() {
+  await loadBatches();     // resolves currentBatchId to the latest batch before anything else fetches
+  loadSummary();
+  loadRecords();
+  loadHeroExamples();
+})();

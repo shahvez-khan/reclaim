@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 
-from schema import get_connection
+from schema import get_connection, get_current_batch_id
 from candidate_actions import (
     candidates_for_transaction, candidates_for_receivable, candidates_for_abandonment,
     score_candidates, EXECUTION_ACTION_MAP,
@@ -309,28 +309,31 @@ def run_decisions(types=("transaction", "receivable", "abandonment")):
     cur = conn.cursor()
     now = datetime.now().isoformat(timespec="seconds")
 
-    diag_by_id = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses").fetchall()}
+    # Phase 2: operate only on the CURRENT/latest batch.
+    batch_id = get_current_batch_id(conn)
+
+    diag_by_id = {d["record_id"]: d for d in cur.execute("SELECT * FROM diagnoses WHERE batch_id = ?", (batch_id,)).fetchall()}
     decisions = []
 
     if "transaction" in types:
-        for row in cur.execute("SELECT * FROM transactions").fetchall():
+        for row in cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (batch_id,)).fetchall():
             diag = diag_by_id[row["transaction_id"]]
             decisions.append(decide_transaction(row, diag))
 
     if "receivable" in types:
-        for row in cur.execute("SELECT * FROM receivables").fetchall():
+        for row in cur.execute("SELECT * FROM receivables WHERE batch_id = ?", (batch_id,)).fetchall():
             diag = diag_by_id[row["invoice_id"]]
             decisions.append(decide_receivable(row, diag))
 
     if "abandonment" in types:
-        for row in cur.execute("SELECT * FROM checkout_abandonments").fetchall():
+        for row in cur.execute("SELECT * FROM checkout_abandonments WHERE batch_id = ?", (batch_id,)).fetchall():
             diag = diag_by_id[row["session_id"]]
             decisions.append(decide_abandonment(row, diag))
 
     # --- Hard test: no decision on a record with attempt_count >= 3 is an automated action ---
-    txn_by_id = {r["transaction_id"]: r for r in cur.execute("SELECT * FROM transactions").fetchall()}
-    inv_by_id = {r["invoice_id"]: r for r in cur.execute("SELECT * FROM receivables").fetchall()}
-    ab_by_id = {r["session_id"]: r for r in cur.execute("SELECT * FROM checkout_abandonments").fetchall()}
+    txn_by_id = {r["transaction_id"]: r for r in cur.execute("SELECT * FROM transactions WHERE batch_id = ?", (batch_id,)).fetchall()}
+    inv_by_id = {r["invoice_id"]: r for r in cur.execute("SELECT * FROM receivables WHERE batch_id = ?", (batch_id,)).fetchall()}
+    ab_by_id = {r["session_id"]: r for r in cur.execute("SELECT * FROM checkout_abandonments WHERE batch_id = ?", (batch_id,)).fetchall()}
 
     violations = []
     for d in decisions:
@@ -346,17 +349,20 @@ def run_decisions(types=("transaction", "receivable", "abandonment")):
     assert not violations, f"STOPPING RULE VIOLATION on {len(violations)} record(s): {violations[:3]}"
     print("✅ STOPPING RULE TEST PASSED: no record exceeded max attempts, bypassed opt-out, or skipped risk escalation.\n")
 
-    cur.execute("DELETE FROM decisions WHERE record_type IN ({})".format(",".join("?" * len(types))), types)
+    cur.execute(
+        "DELETE FROM decisions WHERE batch_id = ? AND record_type IN ({})".format(",".join("?" * len(types))),
+        (batch_id, *types),
+    )
     cur.executemany(
         """INSERT INTO decisions
            (decision_id, record_id, record_type, attempt_number, action, reasoning, retry_at, decided_at,
-            stopping_rule_fired, candidate_actions, ml_selected_action)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            stopping_rule_fired, candidate_actions, ml_selected_action, batch_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         [
             (f"dec_{d['record_id']}_{d['attempt_number']}", d["record_id"], d["record_type"], d["attempt_number"],
              d["action"], d["reasoning"], d["retry_at"], now, d["stopping_rule_fired"],
              json.dumps(d["candidate_actions"]) if d["candidate_actions"] else None,
-             d["ml_selected_action"])
+             d["ml_selected_action"], batch_id)
             for d in decisions
         ],
     )

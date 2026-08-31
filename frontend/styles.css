@@ -178,6 +178,16 @@ main, header { position: relative; z-index: 1; }
 .btn-ghost:hover { background: var(--bg-panel-raised); border-color: var(--blue); }
 .btn-ghost:disabled { opacity: 0.5; cursor: wait; }
 
+.batch-select {
+  appearance: none;
+  -webkit-appearance: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-select:disabled { opacity: 0.5; cursor: wait; }
+
 .theme-toggle {
   display: flex;
   align-items: center;
