@@ -262,14 +262,22 @@ def execute_decision(decision_row, record, now: str) -> dict:
         actor = "agent"  # the *escalation* is an agent action; the human hasn't acted yet
 
     elif action == "stop_no_action":
-        outcome = "Closed with no further action, per stopping rule."
-        if decision_row["stopping_rule_fired"] == "cooldown_24h":
-            # temporary hold, not terminal — record stays in its current state
+        if decision_row["stopping_rule_fired"] in ("cooldown_24h", "promise_pending"):
+            # temporary hold, not terminal — record stays in its current state.
+            # promise_pending (Phase 3): the customer already has an active
+            # promise-to-pay on file, same "not a terminal closure" reasoning
+            # as the cool-off — this record resumes normal processing once
+            # the promised date passes (flips promise_status to 'broken') or
+            # the customer actually pays.
             new_status = record["status"]
+            outcome = ("Held — customer has an active promise-to-pay on file, not yet due."
+                       if decision_row["stopping_rule_fired"] == "promise_pending"
+                       else "Closed with no further action, per stopping rule.")
         else:
             # e.g. customer_opt_out — a compliance-driven closure, distinct from
             # a genuinely failed recovery attempt. Must not be conflated with "lost".
             new_status = "stopped"
+            outcome = "Closed with no further action, per stopping rule."
         actor = "agent"
 
     else:

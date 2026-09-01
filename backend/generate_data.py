@@ -21,6 +21,11 @@ independently queryable), but it does mean two batches won't look like two
 independently-drawn samples if someone inspects the underlying distribution
 closely. Left as-is rather than silently "fixed" out of scope for this
 phase; a real re-seed-per-batch would be a one-line follow-up.
+
+Phase 3 (promise-to-pay tracker): gen_receivables() also simulates realistic
+promise-to-pay history for a disclosed, hand-set fraction of 45+ day overdue
+invoices — see the inline comment in gen_receivables() for the exact
+weights.
 """
 
 import random
@@ -127,6 +132,25 @@ def gen_receivables(n: int = 400):
         opt_out = 1 if random.random() < 0.03 else 0
         status = "open" if days_overdue < 60 else random.choice(["open", "escalated"])
 
+        # Phase 3 (promise-to-pay tracker) — DISCLOSED, HAND-SET, same
+        # convention as every other distribution in this file: for 45+ day
+        # overdue invoices only (a real collections process would already
+        # have made contact by then), ~30% already have a prior promise on
+        # file. Of those, ~65% are BROKEN (the promised date has already
+        # passed with the invoice still unpaid — the worse, more common
+        # case, since a promise that's still pending would usually mean the
+        # invoice isn't 45+ days overdue anymore by the time it's due) and
+        # ~35% are still PENDING (the promised date hasn't arrived yet).
+        promised_pay_date = None
+        promise_status = "none"
+        if days_overdue >= 45 and random.random() < 0.30:
+            if random.random() < 0.65:
+                promise_status = "broken"
+                promised_pay_date = (datetime.now() - timedelta(days=random.randint(1, 14))).date().isoformat()
+            else:
+                promise_status = "pending"
+                promised_pay_date = (datetime.now() + timedelta(days=random.randint(1, 10))).date().isoformat()
+
         rows.append((
             f"inv_{uuid.uuid4().hex[:10]}",
             f"cust_{uuid.uuid4().hex[:8]}",
@@ -138,6 +162,8 @@ def gen_receivables(n: int = 400):
             opt_out,
             n_contacts,
             random_timestamp_within_days(days_overdue) if n_contacts > 0 else None,
+            promised_pay_date,
+            promise_status,
         ))
     return rows
 
@@ -229,8 +255,8 @@ def populate():
         """INSERT INTO receivables
            (invoice_id, customer_id, amount, due_date, days_overdue,
             contact_history, status, customer_opt_out, attempt_count,
-            last_action_timestamp, batch_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            last_action_timestamp, promised_pay_date, promise_status, batch_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [row + (batch_id,) for row in recv],
     )
 

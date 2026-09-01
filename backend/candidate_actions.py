@@ -61,9 +61,21 @@ def candidates_for_transaction(failure_code: str) -> list[str]:
     return CANDIDATE_ACTIONS_BY_FAILURE_CODE.get(failure_code, [])
 
 
-def candidates_for_receivable(days_overdue: int) -> list[str]:
+def candidates_for_receivable(days_overdue: int, promise_status: str = "none") -> list[str]:
     # POLICY eligibility gate: firmer language isn't permitted this early,
     # regardless of what expected value says. See module docstring.
+    #
+    # Phase 3 (promise-to-pay tracker): a BROKEN promise overrides the
+    # day-count tiering — the customer already committed to a specific date
+    # and missed it, which is a stronger "this needs a firmer touch" signal
+    # than raw invoice age. Make ESCALATE_REMINDER eligible immediately even
+    # for an invoice that would otherwise still be in the soft-reminder tier
+    # by day count alone (days_overdue < 15). A 'pending' promise is handled
+    # entirely upstream in decision.py::decide_receivable (an explicit
+    # policy-level HOLD, not a candidate-eligibility change) — this function
+    # is never even called for a pending-promise record.
+    if promise_status == "broken":
+        return ["SEND_REMINDER", "ESCALATE_REMINDER"]
     if days_overdue < 15:
         return ["SEND_REMINDER"]
     return ["SEND_REMINDER", "ESCALATE_REMINDER"]

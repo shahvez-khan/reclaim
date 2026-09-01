@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS receivables (
     customer_opt_out       INTEGER NOT NULL DEFAULT 0,
     attempt_count           INTEGER NOT NULL DEFAULT 0,
     last_action_timestamp   TEXT,
+    promised_pay_date        TEXT,  -- nullable date the customer promised payment by; NULL if no promise on file.
+                                     -- See migrations/0004_promise_to_pay.sql.
+    promise_status            TEXT NOT NULL DEFAULT 'none',  -- none / pending / broken
     batch_id                 TEXT
 );
 

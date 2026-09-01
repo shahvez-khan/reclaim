@@ -103,6 +103,8 @@ def diagnose_transaction(row) -> dict:
 
 def diagnose_receivable(row) -> dict:
     days_overdue = row["days_overdue"]
+    promise_status = row["promise_status"] if "promise_status" in row.keys() else "none"
+    promised_pay_date = row["promised_pay_date"] if "promised_pay_date" in row.keys() else None
 
     if days_overdue < 15:
         tier = "soft reminder"
@@ -131,8 +133,38 @@ def diagnose_receivable(row) -> dict:
         f"Invoice is {days_overdue} days overdue. "
         f"Recommended track: {tier}."
     )
+
+    # Phase 3: promise-to-pay tracking. A BROKEN promise (customer committed
+    # to a specific date and missed it) is a materially worse signal than
+    # raw day-count alone — it overrides the tier/urgency/confidence/
+    # manual-followup this record would otherwise get purely from
+    # days_overdue, regardless of which tier that day count would normally
+    # land in (see candidate_actions.py::candidates_for_receivable for the
+    # matching candidate-eligibility override).
+    if promise_status == "broken":
+        urgency = "immediate"
+        confidence = 0.92  # a broken, DATED commitment is a more reliable signal than day-count tiering alone
+        needs_manual_followup = True  # forced true regardless of days_overdue tier
+        root_cause = (
+            f"Invoice is {days_overdue} days overdue, AND the customer previously promised payment by "
+            f"{promised_pay_date}, which has now passed with the invoice still unpaid. A BROKEN promise-to-pay "
+            "is a materially worse signal than being overdue alone — escalate rather than treat this as a "
+            "normal day-count reminder tier."
+        )
+    elif promise_status == "pending":
+        # Not an override of urgency/confidence/followup — a pending promise
+        # is a reason to HOLD outreach (see decision.py's decide_receivable),
+        # not a reason to treat the diagnosis itself as more or less urgent.
+        root_cause += (
+            f" Customer has an active promise to pay by {promised_pay_date}, which hasn't arrived yet."
+        )
+
     if needs_manual_followup:
-        root_cause += " Also flagged for manual follow-up given how overdue this account is — but automated outreach still proceeds in parallel."
+        root_cause += (
+            " Also flagged for manual follow-up given the broken promise."
+            if promise_status == "broken" else
+            " Also flagged for manual follow-up given how overdue this account is — but automated outreach still proceeds in parallel."
+        )
 
     return {
         "record_id": row["invoice_id"],

@@ -322,12 +322,23 @@ def get_records(status: str | None = None, record_type: str | None = None, batch
             bucket = _bucket_for(r["status"], dec)
             if status and status != bucket:
                 continue
+            promise_status = r["promise_status"] if "promise_status" in r.keys() else "none"
+            # Phase 3: surface the promise-to-pay state in the same detail
+            # string the table/receipt already render, e.g.
+            # "67 days overdue · broken promise (was due 12 days ago)".
+            detail = f"{r['days_overdue']} days overdue"
+            if promise_status == "broken":
+                days_broken = (datetime.now().date() - datetime.fromisoformat(r["promised_pay_date"]).date()).days
+                detail += f" · broken promise (was due {days_broken} day{'s' if days_broken != 1 else ''} ago)"
+            elif promise_status == "pending":
+                days_until = (datetime.fromisoformat(r["promised_pay_date"]).date() - datetime.now().date()).days
+                detail += f" · promise pending (due in {days_until} day{'s' if days_until != 1 else ''})"
             results.append({
                 "record_id": r["invoice_id"],
                 "record_type": "receivable",
                 "customer_id": r["customer_id"],
                 "amount": r["amount"],
-                "detail": f"{r['days_overdue']} days overdue",
+                "detail": detail,
                 "payment_method": None,
                 "status": r["status"],
                 "bucket": bucket,
@@ -336,6 +347,7 @@ def get_records(status: str | None = None, record_type: str | None = None, batch
                 "needs_manual_followup": bool(diag["needs_manual_followup"]) if diag else False,
                 "attempt_count": r["attempt_count"],
                 "replanned": bool(dec and dec["attempt_number"] > 1),
+                "promise_status": promise_status,
             })
 
     if record_type is None or record_type == "abandonment":

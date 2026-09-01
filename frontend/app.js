@@ -17,6 +17,7 @@ const STOPPING_RULE_LABELS = {
   max_attempts: { name: "Max attempts reached", desc: "Stopped after 3 automated attempts" },
   cooldown_24h: { name: "24h cool-off held", desc: "No stacked outreach within 24h" },
   candidates_exhausted: { name: "Ran out of options", desc: "No untried recovery actions left — routed to a human instead of giving up silently" },
+  promise_pending: { name: "Promise pending held", desc: "Active promise-to-pay on file, not yet due — held instead of nagging" },
 };
 
 // Short one-line labels for the records table's Action column — the raw
@@ -348,9 +349,23 @@ function renderCandidateTable(candidates, chosen) {
 function renderReceipt(data) {
   const { record_type, record, diagnosis, decisions, audit_log } = data;
   const amount = record.amount;
-  const label = record_type === "transaction" ? record.failure_code.replace(/_/g, " ")
-    : record_type === "receivable" ? `${record.days_overdue} days overdue`
-    : "cart abandoned" + (record.payment_attempted ? " (payment attempted)" : "");
+  let label;
+  if (record_type === "transaction") {
+    label = record.failure_code.replace(/_/g, " ");
+  } else if (record_type === "receivable") {
+    label = `${record.days_overdue} days overdue`;
+    // Phase 3: surface promise-to-pay state in the receipt, same string
+    // shape as /api/records' detail field.
+    if (record.promise_status === "broken" && record.promised_pay_date) {
+      const daysBroken = Math.round((Date.now() - new Date(record.promised_pay_date)) / 86400000);
+      label += ` · broken promise (was due ${daysBroken} day${daysBroken !== 1 ? "s" : ""} ago)`;
+    } else if (record.promise_status === "pending" && record.promised_pay_date) {
+      const daysUntil = Math.round((new Date(record.promised_pay_date) - Date.now()) / 86400000);
+      label += ` · promise pending (due in ${daysUntil} day${daysUntil !== 1 ? "s" : ""})`;
+    }
+  } else {
+    label = "cart abandoned" + (record.payment_attempted ? " (payment attempted)" : "");
+  }
 
   // Pair each decision with the audit_log entries it produced. Every attempt
   // writes one ACTION_EXECUTED/RECOVERY_SUCCESS/ESCALATED/STOPPED entry, and

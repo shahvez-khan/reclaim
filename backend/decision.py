@@ -213,8 +213,31 @@ def decide_receivable(inv_row, diag_row) -> dict:
         return _decision(inv_row["invoice_id"], "receivable", "stop_no_action",
                           reasoning_parts, None, "cooldown_24h")
 
+    # Phase 3 (promise-to-pay tracker): a PENDING promise — the customer
+    # already committed to a payment date that hasn't arrived yet — is an
+    # explicit POLICY-level reason to hold, same "don't stack outreach on
+    # top of an active commitment" reasoning as the 24h cool-off above, just
+    # keyed on a customer commitment instead of a time window. This is
+    # deliberately checked here (not folded into candidate scoring) so it
+    # can never be out-ranked by expected value — nagging someone who
+    # already promised a date erodes trust regardless of how attractive the
+    # ML's expected-value number looks. Once the promised date passes
+    # without payment, the next diagnosis pass flips promise_status to
+    # 'broken' (see generate_data.py) and this hold no longer applies —
+    # candidates_for_receivable then makes ESCALATE_REMINDER eligible
+    # immediately.
+    promise_status = inv_row["promise_status"] if "promise_status" in inv_row.keys() else "none"
+    if promise_status == "pending":
+        promised_pay_date = inv_row["promised_pay_date"]
+        reasoning_parts.append(
+            f"HELD: customer already promised payment by {promised_pay_date}, which hasn't arrived yet — "
+            "holding rather than re-contacting on top of an active promise."
+        )
+        return _decision(inv_row["invoice_id"], "receivable", "stop_no_action",
+                          reasoning_parts, None, "promise_pending")
+
     days_overdue = inv_row["days_overdue"]
-    candidates = candidates_for_receivable(days_overdue)
+    candidates = candidates_for_receivable(days_overdue, promise_status)
     now_dt = datetime.now()
     scored = score_candidates(
         candidates, amount=inv_row["amount"], attempt_count=inv_row["attempt_count"],
@@ -228,11 +251,12 @@ def decide_receivable(inv_row, diag_row) -> dict:
     others = ", ".join(f"{c['candidate_action']} {c['probability']*100:.0f}% (₹{c['expected_value']:,.0f})"
                         for c in scored[1:])
     tone_note = (" This is also flagged for a human to check on in parallel, but the automated outreach is not blocked by that flag."
-                 if days_overdue >= 45 else "")
+                 if days_overdue >= 45 or promise_status == "broken" else "")
+    promise_note = " ESCALATE_REMINDER is eligible immediately due to the broken promise, regardless of day-count tier." if promise_status == "broken" else ""
     reasoning_parts.append(
         f"ACTION: ML compared {len(scored)} policy-eligible candidate(s) for a {days_overdue}-day-overdue invoice — "
         f"chose {ml_action} (P={best['probability']*100:.0f}%, expected value ₹{best['expected_value']:,.0f})"
-        + (f", over {others}" if others else "") + f".{tone_note}"
+        + (f", over {others}" if others else "") + f".{tone_note}{promise_note}"
     )
 
     d = _decision(inv_row["invoice_id"], "receivable", action, reasoning_parts, None, None)
