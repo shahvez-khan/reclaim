@@ -22,7 +22,7 @@ decision.py / execution.py, per the priority scoping agreed with the user.
 import json
 from datetime import datetime
 
-from schema import get_connection, get_current_batch_id
+from schema import get_connection, get_current_batch_id, upsert_escalation
 from decision import decide_transaction, MAX_ATTEMPTS
 from config import SAFETY_ITERATION_CAP
 from execution import execute_decision
@@ -74,6 +74,10 @@ def run_agentic_transaction(txn_row, diag_row, conn, batch_id=None) -> dict:
             event_type = "RECOVERY_SUCCESS"
         elif decision["action"] == "escalate_to_human":
             event_type = "ESCALATED"
+            # Phase 4: give this an actual operational surface, not just a
+            # status string — see schema.upsert_escalation().
+            upsert_escalation(conn, decision["record_id"], "transaction",
+                               decision["stopping_rule_fired"] or "escalate_to_human", batch_id, now)
         elif decision["action"] == "stop_no_action":
             event_type = "STOPPED"
         else:

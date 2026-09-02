@@ -8,6 +8,8 @@ Serves:
                                        (optional &batch_id=; default: latest — Phase 2)
   GET  /api/audit/{record_id}      -> full chain: diagnosis -> decision -> execution/audit log
   GET  /api/batches                -> every pipeline run ever executed, newest first, with record counts (Phase 2)
+  GET  /api/escalations?status=    -> operational worklist for escalate_to_human decisions (default: open; cross-batch) (Phase 4)
+  POST /api/escalations/{id}/resolve -> marks an escalation resolved, with an optional resolver note (Phase 4)
   POST /api/run-batch              -> re-runs the whole pipeline fresh (rate-limited — see below); ADDITIVE
                                        since Phase 2 — creates a new batch, does not delete prior ones
   GET  /api/health                 -> liveness + DB connectivity check, for a load balancer/uptime monitor
@@ -41,7 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from schema import get_connection, get_current_batch_id, list_batches
+from schema import get_connection, get_current_batch_id, list_batches, upsert_escalation
 from logging_config import configure_logging
 from config import RUN_BATCH_RATE_LIMIT_MAX, RUN_BATCH_RATE_LIMIT_WINDOW_SECONDS
 
@@ -60,6 +62,7 @@ AUTOMATED_ACTIONS = {
 }
 VALID_RECORD_TYPES = {"transaction", "receivable", "abandonment"}
 VALID_STATUSES = {"recovered", "escalated", "still_failing", "stopped_no_action"}
+VALID_ESCALATION_STATUSES = {"open", "in_review", "resolved"}
 
 
 # --------------------------------------------------------------------------
@@ -170,6 +173,91 @@ def get_batches():
     current = get_current_batch_id(conn)
     conn.close()
     return {"batches": batches, "current_batch_id": current}
+
+
+@app.get("/api/escalations")
+def get_escalations(status: str | None = "open"):
+    """Phase 4: the operational worklist for escalate_to_human decisions —
+    see schema.upsert_escalation(). Deliberately NOT scoped to the current
+    batch (unlike most of the rest of the dashboard) — a human works
+    through this queue across every run until each item is resolved, so it
+    defaults to every OPEN escalation regardless of which batch created it.
+    Pass status=in_review/resolved/... to see other states, or omit the
+    default entirely by passing an empty status to see all (status=None is
+    not reachable via query string, so pass status=open/in_review/resolved
+    explicitly to filter, or hit the endpoint with no override for the
+    open-only default)."""
+    if status is not None and status not in VALID_ESCALATION_STATUSES:
+        raise HTTPException(status_code=400, detail=f"invalid status filter: {status!r}. Must be one of {sorted(VALID_ESCALATION_STATUSES)}")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    query = "SELECT * FROM escalations"
+    params = ()
+    if status is not None:
+        query += " WHERE status = ?"
+        params = (status,)
+    query += " ORDER BY created_at DESC"
+    rows = cur.execute(query, params).fetchall()
+
+    # bulk-fetch amount/detail context so the queue is actionable without a
+    # second round-trip per row (record_id is unique across all three
+    # source tables combined, so a flat id->amount dict is safe).
+    amount_by_id = {}
+    for r in cur.execute("SELECT transaction_id AS id, amount FROM transactions").fetchall():
+        amount_by_id[r["id"]] = r["amount"]
+    for r in cur.execute("SELECT invoice_id AS id, amount FROM receivables").fetchall():
+        amount_by_id[r["id"]] = r["amount"]
+    for r in cur.execute("SELECT session_id AS id, cart_value AS amount FROM checkout_abandonments").fetchall():
+        amount_by_id[r["id"]] = r["amount"]
+
+    conn.close()
+
+    now = datetime.now()
+    results = []
+    for r in rows:
+        created = datetime.fromisoformat(r["created_at"])
+        age_hours = (now - created).total_seconds() / 3600
+        results.append({
+            "escalation_id": r["escalation_id"],
+            "record_id": r["record_id"],
+            "record_type": r["record_type"],
+            "reason": r["reason"],
+            "amount": amount_by_id.get(r["record_id"]),
+            "created_at": r["created_at"],
+            "age_hours": round(age_hours, 1),
+            "status": r["status"],
+            "resolved_at": r["resolved_at"],
+            "resolver_note": r["resolver_note"],
+            "batch_id": r["batch_id"],
+        })
+    return results
+
+
+class ResolveEscalationRequest(BaseModel):
+    resolver_note: str | None = None
+
+
+@app.post("/api/escalations/{escalation_id}/resolve")
+def resolve_escalation(escalation_id: str, body: ResolveEscalationRequest = ResolveEscalationRequest()):
+    conn = get_connection()
+    cur = conn.cursor()
+    row = cur.execute("SELECT * FROM escalations WHERE escalation_id = ?", (escalation_id,)).fetchone()
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"Unknown escalation_id: {escalation_id!r}")
+
+    now = datetime.now().isoformat(timespec="seconds")
+    cur.execute(
+        "UPDATE escalations SET status = 'resolved', resolved_at = ?, resolver_note = ? WHERE escalation_id = ?",
+        (now, body.resolver_note, escalation_id),
+    )
+    conn.commit()
+    updated = dict(cur.execute("SELECT * FROM escalations WHERE escalation_id = ?", (escalation_id,)).fetchone())
+    conn.close()
+    logger.info("escalation_resolved", extra={"escalation_id": escalation_id, "record_id": row["record_id"]})
+    return updated
 
 
 @app.get("/api/summary")

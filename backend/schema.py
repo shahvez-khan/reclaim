@@ -143,6 +143,28 @@ CREATE TABLE IF NOT EXISTS baseline_results (
     baseline_outcome TEXT NOT NULL,
     baseline_recovered INTEGER NOT NULL DEFAULT 0
 );
+
+-- Phase 4: gives an escalate_to_human decision an actual operational
+-- surface — before this, escalation was just a status string with nothing
+-- a human could act on. One row per escalated RECORD (not per decision —
+-- record_id is UNIQUE so a re-escalation upserts rather than duplicates;
+-- see schema.upsert_escalation()). Deliberately NOT scoped to "current
+-- batch only" like most of the dashboard — this is a durable, cross-run
+-- worklist a human works through regardless of which batch created each
+-- item, so GET /api/escalations shows open items from every batch by
+-- default (batch_id is kept for traceability/filtering, not as a default
+-- scope).
+CREATE TABLE IF NOT EXISTS escalations (
+    escalation_id   TEXT PRIMARY KEY,
+    record_id       TEXT NOT NULL UNIQUE,
+    record_type     TEXT NOT NULL,
+    reason          TEXT NOT NULL,   -- the stopping_rule_fired value that caused the escalation
+    created_at      TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'open',  -- open / in_review / resolved
+    resolved_at     TEXT,
+    resolver_note   TEXT,
+    batch_id        TEXT
+);
 """
 
 
@@ -162,6 +184,29 @@ def init_db(reset: bool = False):
     conn.commit()
     conn.close()
     print(f"DB initialized at {DB_PATH}")
+
+
+def upsert_escalation(conn, record_id: str, record_type: str, reason: str, batch_id, now: str):
+    """Phase 4: called wherever an escalate_to_human decision is persisted
+    (agent_loop.py for transactions, decision.py for receivables/
+    abandonments). Upserts keyed on record_id (UNIQUE) rather than always
+    inserting — if a record somehow escalates again (re-run, re-plan),
+    this REOPENS it (status back to 'open', resolved_at/resolver_note
+    cleared) with the latest reason/timestamp, rather than silently
+    duplicating rows for the same record in the worklist."""
+    import uuid as _uuid
+    conn.execute(
+        """INSERT INTO escalations (escalation_id, record_id, record_type, reason, created_at, status, batch_id)
+           VALUES (?, ?, ?, ?, ?, 'open', ?)
+           ON CONFLICT(record_id) DO UPDATE SET
+               reason = excluded.reason,
+               created_at = excluded.created_at,
+               status = 'open',
+               resolved_at = NULL,
+               resolver_note = NULL,
+               batch_id = excluded.batch_id""",
+        (f"esc_{_uuid.uuid4().hex[:10]}", record_id, record_type, reason, now, batch_id),
+    )
 
 
 def create_batch(conn, record_counts: dict) -> str:

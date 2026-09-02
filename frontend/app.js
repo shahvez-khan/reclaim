@@ -452,6 +452,7 @@ document.getElementById("runBatchBtn").addEventListener("click", async (e) => {
     await loadSummary();
     await loadRecords(currentFilter);
     await loadHeroExamples();
+    await loadEscalations();
     btn.textContent = "Re-run batch";
   } catch (err) {
     btn.textContent = "Failed — retry";
@@ -479,9 +480,75 @@ async function loadHeroExamples() {
   });
 }
 
+function fmtAge(hours) {
+  if (hours < 1) return "just now";
+  if (hours < 24) return `${Math.round(hours)}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+// Phase 4: Escalation Queue — a cross-batch operational worklist (not
+// scoped to currentBatchId, matching /api/escalations' own default scope —
+// a human works through this regardless of which batch created each item).
+async function loadEscalations() {
+  const el = document.getElementById("escalationsList");
+  const countEl = document.getElementById("escalationsCount");
+  try {
+    const res = await fetch(`${API}/api/escalations`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const escalations = await res.json();
+    countEl.textContent = `${escalations.length} open`;
+
+    if (escalations.length === 0) {
+      el.innerHTML = `<p class="escalations-empty">No open escalations — the agent is handling everything within policy.</p>`;
+      return;
+    }
+
+    el.innerHTML = escalations.map(e => `
+      <div class="escalation-item" data-escalation-id="${escapeHtml(e.escalation_id)}">
+        <div class="escalation-main">
+          <span class="escalation-record">${escapeHtml(e.record_id)} · ${escapeHtml(e.record_type)}</span>
+          <span class="escalation-reason">${escapeHtml((e.reason || "").replace(/_/g, " "))}</span>
+        </div>
+        <div class="escalation-meta">
+          <span class="escalation-amount">${e.amount != null ? fmtINR(e.amount) : "—"}</span>
+          <span class="escalation-age">${fmtAge(e.age_hours)}</span>
+          <button class="escalation-resolve-btn" data-escalation-id="${escapeHtml(e.escalation_id)}">Mark resolved</button>
+        </div>
+      </div>
+    `).join("");
+
+    el.querySelectorAll(".escalation-resolve-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.escalationId;
+        btn.disabled = true;
+        btn.textContent = "Resolving…";
+        try {
+          const res = await fetch(`${API}/api/escalations/${encodeURIComponent(id)}/resolve`, { method: "POST" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          // remove just this row from the open-queue view rather than a full reload
+          const row = el.querySelector(`.escalation-item[data-escalation-id="${CSS.escape(id)}"]`);
+          if (row) row.remove();
+          const remaining = el.querySelectorAll(".escalation-item").length;
+          countEl.textContent = `${remaining} open`;
+          if (remaining === 0) {
+            el.innerHTML = `<p class="escalations-empty">No open escalations — the agent is handling everything within policy.</p>`;
+          }
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = "Failed — retry";
+        }
+      });
+    });
+  } catch (err) {
+    console.error("Failed to load escalations:", err);
+    el.innerHTML = `<p class="loading-state error-state">Couldn't load escalations. <button onclick="loadEscalations()" class="btn-ghost">Retry</button></p>`;
+  }
+}
+
 (async function init() {
   await loadBatches();     // resolves currentBatchId to the latest batch before anything else fetches
   loadSummary();
   loadRecords();
   loadHeroExamples();
+  loadEscalations();
 })();

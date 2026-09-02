@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 
-from schema import get_connection, get_current_batch_id
+from schema import get_connection, get_current_batch_id, upsert_escalation
 from candidate_actions import (
     candidates_for_transaction, candidates_for_receivable, candidates_for_abandonment,
     score_candidates, EXECUTION_ACTION_MAP,
@@ -390,6 +390,15 @@ def run_decisions(types=("transaction", "receivable", "abandonment")):
             for d in decisions
         ],
     )
+
+    # Phase 4: give every escalate_to_human decision an actual operational
+    # surface — see schema.upsert_escalation(). (Transactions' escalations
+    # are handled inline in agent_loop.py as they happen, since transactions
+    # don't flow through this bulk path.)
+    for d in decisions:
+        if d["action"] == "escalate_to_human":
+            upsert_escalation(conn, d["record_id"], d["record_type"], d["stopping_rule_fired"] or "escalate_to_human", batch_id, now)
+
     conn.commit()
 
     # --- Action distribution table ---
