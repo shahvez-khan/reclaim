@@ -139,6 +139,8 @@ async function loadBaselineComparison() {
         return `<div class="baseline-secondary"><div class="baseline-secondary-row"><span>${label} — no policy-eligible records to compare.</span></div></div>`;
       }
       const barWidth = Math.min(100, (c.agent_recovered / c.baseline_recovered) * 100);
+      const hasCi = c.recovery_rate_delta_ci_95 && c.recovery_rate_delta_ci_95[0] != null;
+      const fmtPP = (v) => `${v >= 0 ? "+" : ""}${v}pp`;
       return `
         <div class="baseline-row">
           <div class="baseline-bar-group">
@@ -153,6 +155,14 @@ async function loadBaselineComparison() {
             ${c.incremental >= 0 ? "+" : ""}${fmtINR(c.incremental)} incremental
             (${c.incremental_pct >= 0 ? "+" : ""}${c.incremental_pct}%) · ${c.eligible_records} eligible of ${c.n_records}
           </div>
+          ${hasCi ? `
+          <div class="baseline-ci ${c.recovery_rate_delta_significant ? 'significant' : 'not-significant'}">
+            Recovery rate: ${c.recovery_rate_agent}% agent vs ${c.recovery_rate_baseline}% baseline —
+            ${fmtPP(c.recovery_rate_delta_pct_points)} (95% CI: ${fmtPP(c.recovery_rate_delta_ci_95[0])} to ${fmtPP(c.recovery_rate_delta_ci_95[1])})
+            ${c.recovery_rate_delta_significant
+              ? " — statistically significant at 95% confidence"
+              : " — not statistically significant at this sample size (interval includes 0)"}
+          </div>` : ""}
           ${c.caveat ? `<p class="baseline-caveat">${c.caveat}</p>` : ""}
         </div>
       `;

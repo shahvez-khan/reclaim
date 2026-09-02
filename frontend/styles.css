@@ -839,6 +839,18 @@ tbody tr:hover { background: var(--hover-tint); }
 .baseline-incremental.positive { color: var(--green); background: var(--green-soft); }
 .baseline-incremental.negative { color: var(--red-light); background: var(--red-soft); }
 
+.baseline-ci {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--slate);
+  max-width: 100%;
+  word-break: break-word;
+}
+.baseline-ci.significant { color: var(--text); }
+.baseline-ci.not-significant { color: var(--slate-dim); }
+
 .baseline-secondary {
   border-top: 1px solid var(--border);
   padding-top: 14px;

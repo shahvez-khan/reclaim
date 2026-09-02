@@ -44,6 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from schema import get_connection, get_current_batch_id, list_batches, upsert_escalation
+from stats import two_proportion_diff_ci
 from logging_config import configure_logging
 from config import RUN_BATCH_RATE_LIMIT_MAX, RUN_BATCH_RATE_LIMIT_WINDOW_SECONDS
 
@@ -577,15 +578,16 @@ def get_baseline_comparison(batch_id: str | None = None):
             (record_type,),
         ).fetchone()
         n, _, eligible_n = row
-        baseline_recovered = cur.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM baseline_results WHERE record_type=? AND baseline_recovered=1",
+        baseline_recovered_row = cur.execute(
+            "SELECT COALESCE(SUM(amount),0), COUNT(*) FROM baseline_results WHERE record_type=? AND baseline_recovered=1",
             (record_type,),
-        ).fetchone()[0]
-        return n, eligible_n or 0, baseline_recovered
+        ).fetchone()
+        baseline_recovered, baseline_recovered_count = baseline_recovered_row
+        return n, eligible_n or 0, baseline_recovered, baseline_recovered_count
 
-    txn_n, txn_eligible, txn_baseline = slice_for("transaction")
-    recv_n, recv_eligible, recv_baseline = slice_for("receivable")
-    aband_n, aband_eligible, aband_baseline = slice_for("abandonment")
+    txn_n, txn_eligible, txn_baseline, txn_baseline_count = slice_for("transaction")
+    recv_n, recv_eligible, recv_baseline, recv_baseline_count = slice_for("receivable")
+    aband_n, aband_eligible, aband_baseline, aband_baseline_count = slice_for("abandonment")
 
     txn_agent = cur.execute(
         "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE batch_id = ? AND status='recovered'", (current_batch,)
@@ -600,9 +602,25 @@ def get_baseline_comparison(batch_id: str | None = None):
         (current_batch,),
     ).fetchone()[0]
 
+    # Phase 5: recovered COUNTS for the agent side (the recovery-RATE CI's
+    # numerator) — status='recovered' already implies the record went
+    # through an automated action attempt, i.e. was eligible, so this is
+    # directly comparable to baseline_recovered_count above (both counts are
+    # drawn from the same eligible-N denominator per category, computed
+    # below).
+    txn_agent_count = cur.execute(
+        "SELECT COUNT(*) FROM transactions WHERE batch_id = ? AND status='recovered'", (current_batch,)
+    ).fetchone()[0]
+    recv_agent_count = cur.execute(
+        "SELECT COUNT(*) FROM receivables WHERE batch_id = ? AND status='recovered'", (current_batch,)
+    ).fetchone()[0]
+    aband_agent_count = cur.execute(
+        "SELECT COUNT(*) FROM checkout_abandonments WHERE batch_id = ? AND status='recovered'", (current_batch,)
+    ).fetchone()[0]
+
     conn.close()
 
-    def compare(n, eligible, baseline, agent, small_sample_note=None):
+    def compare(n, eligible, baseline, agent, baseline_count, agent_count, small_sample_note=None):
         d = {
             "n_records": n,
             "eligible_records": eligible,
@@ -611,20 +629,34 @@ def get_baseline_comparison(batch_id: str | None = None):
             "incremental": agent - baseline,
             "incremental_pct": round((agent - baseline) / baseline * 100, 1) if baseline else None,
         }
+        # Phase 5: 95% CI on the RECOVERY-RATE delta (not the dollar-amount
+        # delta — see stats.py's module docstring for why that's the
+        # statistically defensible choice here). Both proportions share the
+        # same `eligible` denominator, since that's the population both
+        # strategies were actually allowed to act on.
+        ci = two_proportion_diff_ci(baseline_count, eligible, agent_count, eligible)
+        d["recovery_rate_baseline"] = round(baseline_count / eligible * 100, 1) if eligible else None
+        d["recovery_rate_agent"] = round(agent_count / eligible * 100, 1) if eligible else None
+        d["recovery_rate_delta_pct_points"] = round(ci["point_estimate"] * 100, 1) if ci["point_estimate"] is not None else None
+        d["recovery_rate_delta_ci_95"] = (
+            [round(ci["ci_95"][0] * 100, 1), round(ci["ci_95"][1] * 100, 1)]
+            if ci["ci_95"][0] is not None else [None, None]
+        )
+        d["recovery_rate_delta_significant"] = ci["significant"]
         if small_sample_note and eligible < 100:
             d["caveat"] = small_sample_note
         return d
 
     return {
         "batch_id": current_batch,
-        "transactions": compare(txn_n, txn_eligible, txn_baseline, txn_agent),
+        "transactions": compare(txn_n, txn_eligible, txn_baseline, txn_agent, txn_baseline_count, txn_agent_count),
         "receivables": compare(
-            recv_n, recv_eligible, recv_baseline, recv_agent,
+            recv_n, recv_eligible, recv_baseline, recv_agent, recv_baseline_count, recv_agent_count,
             small_sample_note="Eligible-record count is below 100 — at this sample size a single "
                                 "lucky/unlucky draw can meaningfully move the result. Read with caution.",
         ),
         "abandonments": compare(
-            aband_n, aband_eligible, aband_baseline, aband_agent,
+            aband_n, aband_eligible, aband_baseline, aband_agent, aband_baseline_count, aband_agent_count,
             small_sample_note="Eligible-record count is below 100 — at this sample size a single "
                                 "lucky/unlucky draw can meaningfully move the result. Read with caution.",
         ),
