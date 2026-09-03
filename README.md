@@ -228,11 +228,27 @@ Bootstraps data + trains the model on first run automatically (see `docker-entry
 - The DB layer, CI, and Docker setup have the scope caveats described in **Production readiness** above — read that section before assuming this is fully verified end-to-end in a live CI/Docker environment.
 - Receivables' and abandonments' sample sizes (400 and 200 generated records respectively) are far better-powered than the original ~50/~27-eligible receivables-only build, but are still smaller than a real production batch — the dashboard and README both report eligible-N alongside every comparison rather than asserting confidence the sample size doesn't support.
 
+## Scope vs. the track brief
+
+The track brief names seven example directions. This project builds four of them in depth rather than attempting a shallow pass at all seven:
+
+**Built:**
+- **Payment degradation → root cause → recovery action** — `diagnosis.py` classifies by `failure_code` (insufficient funds, expired card, bank timeout, OTP failure, risk block, issuer decline), each routed to a distinct recovery path.
+- **Checkout drop-off recovery** — cart abandonment diagnosis, recency-tiered outreach, and a gated discount nudge with correctly net-of-discount recovered-amount accounting.
+- **B2B receivables chaser** — day-count-tiered reminder escalation.
+- **Promise-to-pay tracker** — not a bolt-on: `promised_pay_date`/`promise_status` (`none`/`pending`/`broken`) are real fields that change diagnosis, candidate-action eligibility, and decision-making — a broken promise escalates immediately regardless of day-count tier, a pending one is an explicit policy-level hold. See `generate_data.py::gen_receivables`, `diagnosis.py::diagnose_receivable`, `candidate_actions.py::candidates_for_receivable`, and `decision.py::decide_receivable`.
+
+**Not built:**
+- **Failed-subscription recovery** and **mandate retry sequencer** — both need a genuinely different data shape (a billing-cycle concept, a mandate ID, a subscription state machine) that doesn't reuse the transaction/receivable/abandonment model this project is built around. Retrofitting that shape in would mean building a fourth parallel record type with its own diagnosis/decision/execution path from scratch, not extending an existing one — judged out of scope for depth-over-breadth reasons, not overlooked.
+- **Hinglish voice recovery** — a different modality entirely (speech input/output, code-mixed language understanding), with no existing infrastructure here to extend. This project's entire recovery loop is text/API-driven; voice would be a separate system bolted alongside it, not a feature added to it.
+
+Depth-over-breadth was the deliberate tradeoff: the four built directions get a real ML-ranked decision engine, a bounded re-plan loop with tested stopping rules, a durable cross-batch audit trail, an actionable escalation queue, and a statistically-honest baseline comparison — rather than five directions each getting a shallow, unverified pass.
+
 ## Future work
 
 - Public UPI transaction dataset for more realistic amount/timing distributions, if network access allows
 - Extend the bounded re-plan loop to receivables with a multi-day-aware scheduler
-- Subscription/mandate recovery, using the same agent engine
+- Subscription/mandate recovery — see "Scope vs. the track brief" above for why this wasn't attempted this round; it would need a new billing-cycle/mandate-ID data model, not just a new decision path on the existing one
 - A real `RazorpayExecutor` implementation, including the async/webhook-driven retry flow a real gateway integration actually needs (see Production readiness)
 - The SQLAlchemy query-layer migration described in Production readiness
 - Larger-scale batch evaluation (thousands of records) for tighter confidence intervals across all three categories
