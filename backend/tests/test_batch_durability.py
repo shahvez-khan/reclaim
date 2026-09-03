@@ -63,9 +63,9 @@ def test_pipeline_runs_are_additive_not_destructive():
         schema.init_db(reset=True)  # ONE reset here to create the fresh test DB's schema — not part of the pipeline itself
 
         import generate_data
-        from diagnosis import run_diagnosis
         from agent_loop import run_agent_loop_for_all_transactions
         from decision import run_decisions
+        from diagnosis import run_diagnosis
         from execution import run_execution
 
         def run_one_pipeline_pass():

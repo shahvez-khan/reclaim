@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from stats import wilson_ci, two_proportion_diff_ci
+from stats import two_proportion_diff_ci, wilson_ci
 
 
 def test_wilson_ci_matches_hand_derived_reference():

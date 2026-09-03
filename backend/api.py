@@ -37,16 +37,15 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from config import RUN_BATCH_RATE_LIMIT_MAX, RUN_BATCH_RATE_LIMIT_WINDOW_SECONDS
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
-
-from schema import get_connection, get_current_batch_id, list_batches, upsert_escalation
-from stats import two_proportion_diff_ci
+from fastapi.staticfiles import StaticFiles
 from logging_config import configure_logging
-from config import RUN_BATCH_RATE_LIMIT_MAX, RUN_BATCH_RATE_LIMIT_WINDOW_SECONDS
+from pydantic import BaseModel
+from schema import get_connection, get_current_batch_id, list_batches
+from stats import two_proportion_diff_ci
 
 configure_logging()
 logger = logging.getLogger("revenue_recovery.api")
@@ -241,7 +240,9 @@ class ResolveEscalationRequest(BaseModel):
 
 
 @app.post("/api/escalations/{escalation_id}/resolve")
-def resolve_escalation(escalation_id: str, body: ResolveEscalationRequest = ResolveEscalationRequest()):
+def resolve_escalation(escalation_id: str, body: ResolveEscalationRequest | None = None):
+    if body is None:
+        body = ResolveEscalationRequest()
     conn = get_connection()
     cur = conn.cursor()
     row = cur.execute("SELECT * FROM escalations WHERE escalation_id = ?", (escalation_id,)).fetchone()
@@ -530,7 +531,7 @@ def run_batch():
 
     result = subprocess.run(
         [sys.executable, str(BACKEND_DIR / "run_pipeline.py")],
-        capture_output=True, text=True, cwd=BACKEND_DIR,
+        capture_output=True, text=True, cwd=BACKEND_DIR, check=False,
     )
     if result.returncode != 0:
         if "PipelineAlreadyRunningError" in result.stderr:

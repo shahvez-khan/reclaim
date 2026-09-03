@@ -24,7 +24,7 @@ Usage:
 import sys
 from pathlib import Path
 
-from schema import get_connection, DB_PATH
+from schema import DB_PATH, get_connection
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 

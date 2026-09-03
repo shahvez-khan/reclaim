@@ -43,5 +43,7 @@ def get_engine():
     be installed (not a dependency of the core sqlite3-based pipeline today —
     add it to backend/requirements.txt when the query-layer rewrite above is
     actually undertaken)."""
-    from sqlalchemy import create_engine  # imported lazily so sqlalchemy isn't a hard dependency yet
+    from sqlalchemy import (
+        create_engine,  # imported lazily so sqlalchemy isn't a hard dependency yet
+    )
     return create_engine(DATABASE_URL)

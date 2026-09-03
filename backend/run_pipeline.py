@@ -32,13 +32,13 @@ import os
 import time
 from pathlib import Path
 
-from generate_data import populate
-from diagnosis import run_diagnosis
-from decision import run_decisions
-from execution import run_execution
 from agent_loop import run_agent_loop_for_all_transactions
 from baseline import run_baseline
-from schema import get_connection, snapshot_initial_data, get_current_batch_id
+from decision import run_decisions
+from diagnosis import run_diagnosis
+from execution import run_execution
+from generate_data import populate
+from schema import get_connection, get_current_batch_id, snapshot_initial_data
 
 PIPELINE_LOCK_PATH = Path(__file__).parent.parent / "data" / "pipeline.lock"
 

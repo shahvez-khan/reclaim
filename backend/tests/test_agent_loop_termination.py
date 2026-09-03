@@ -31,6 +31,7 @@ DB_PATH_OVERRIDE = _make_temp_db()
 _config.DB_PATH = DB_PATH_OVERRIDE
 
 import schema  # noqa: E402
+
 schema.DB_PATH = DB_PATH_OVERRIDE
 schema.init_db(reset=True)
 

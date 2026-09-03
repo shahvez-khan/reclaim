@@ -32,7 +32,7 @@ import random
 import uuid
 from datetime import datetime, timedelta
 
-from schema import get_connection, init_db, create_batch
+from schema import create_batch, get_connection, init_db
 
 random.seed(42)  # reproducible demo data
 

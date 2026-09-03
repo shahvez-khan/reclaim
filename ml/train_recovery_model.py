@@ -17,13 +17,16 @@ feature selection (pre-action fields only), which is enforced above.
 import json
 
 import joblib
-import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    average_precision_score, brier_score_loss, confusion_matrix,
-    precision_score, recall_score, roc_auc_score,
+    average_precision_score,
+    brier_score_loss,
+    confusion_matrix,
+    precision_score,
+    recall_score,
+    roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -121,19 +124,19 @@ def train():
 
     lr = LogisticRegression(max_iter=1000, class_weight="balanced")
     lr.fit(X_train_scaled, y_train)
-    lr_metrics, lr_cm = evaluate("Logistic Regression (baseline)", lr, X_test_scaled, y_test)
+    lr_metrics, _lr_cm = evaluate("Logistic Regression (baseline)", lr, X_test_scaled, y_test)
 
     rf = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=15,
                                  random_state=42, class_weight="balanced")
     rf.fit(X_train, y_train)  # unscaled is fine for RF
-    rf_metrics, rf_cm = evaluate("Random Forest", rf, X_test, y_test)
+    rf_metrics, _rf_cm = evaluate("Random Forest", rf, X_test, y_test)
 
     # Select on ROC-AUC (standard for ranking candidate actions by probability);
     # ties/near-ties favor the simpler, more interpretable Logistic Regression.
     if rf_metrics["roc_auc"] > lr_metrics["roc_auc"] + 0.01:
-        chosen_name, chosen_model, chosen_metrics = "random_forest", rf, rf_metrics
+        chosen_name, chosen_model, _chosen_metrics = "random_forest", rf, rf_metrics
     else:
-        chosen_name, chosen_model, chosen_metrics = "logistic_regression", lr, lr_metrics
+        chosen_name, chosen_model, _chosen_metrics = "logistic_regression", lr, lr_metrics
 
     print(f"\n{'='*60}\nSELECTED MODEL: {chosen_name}\n{'='*60}")
 
@@ -163,8 +166,8 @@ def train():
     with open("models/model_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"\nSaved model to models/recovery_model.pkl")
-    print(f"Saved metadata to models/model_metadata.json")
+    print("\nSaved model to models/recovery_model.pkl")
+    print("Saved metadata to models/model_metadata.json")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ drop-in swap later (see `llm_diagnose_stub` at the bottom) without touching the
 decision/execution stages.
 """
 
-import json
 from datetime import datetime, timedelta
 
 from schema import get_connection, get_current_batch_id

@@ -43,16 +43,17 @@ def test_full_pipeline_invariant_holds_for_all_three_categories():
         schema.DB_PATH = db_path
         schema.init_db(reset=True)
 
-        import generate_data
         import random as _random
+
+        import generate_data
         _random.seed(42)  # fixed seed — this test is about the invariant holding, not about specific outcomes
         generate_data.populate()  # uses the project's actual configured record counts (200/400/200)
 
-        from diagnosis import run_diagnosis
         from agent_loop import run_agent_loop_for_all_transactions
         from decision import run_decisions
+        from diagnosis import run_diagnosis
         from execution import run_execution
-        from schema import snapshot_initial_data, get_connection
+        from schema import get_connection, snapshot_initial_data
 
         snapshot_initial_data()
         run_diagnosis()

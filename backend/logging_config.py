@@ -21,10 +21,9 @@ import json
 import logging
 import sys
 import uuid
-from datetime import datetime
-from pathlib import Path
 
-from config import LOG_DIR as _CONFIG_LOG_DIR, LOG_LEVEL
+from config import LOG_DIR as _CONFIG_LOG_DIR
+from config import LOG_LEVEL
 
 LOG_DIR = _CONFIG_LOG_DIR
 LOG_FILE = LOG_DIR / "revenue_recovery.jsonl"

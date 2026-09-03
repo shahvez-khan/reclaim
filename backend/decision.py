@@ -12,17 +12,20 @@ This ordering IS the compliance guarantee: opt-out and risk-flag are checked
 before anything else can fire, so no combination of rules can route around them.
 """
 
-from datetime import datetime, timedelta
 import json
 import logging
+from datetime import datetime, timedelta
 
-from schema import get_connection, get_current_batch_id, upsert_escalation
 from candidate_actions import (
-    candidates_for_transaction, candidates_for_receivable, candidates_for_abandonment,
-    score_candidates, EXECUTION_ACTION_MAP,
+    EXECUTION_ACTION_MAP,
+    candidates_for_abandonment,
+    candidates_for_receivable,
+    candidates_for_transaction,
+    score_candidates,
 )
-from logging_config import configure_logging
 from config import COOLDOWN_HOURS, MAX_ATTEMPTS
+from logging_config import configure_logging
+from schema import get_connection, get_current_batch_id, upsert_escalation
 
 configure_logging()
 logger = logging.getLogger("revenue_recovery.decision")
@@ -289,7 +292,6 @@ def decide_abandonment(ab_row, diag_row) -> dict:
                           reasoning_parts, None, "cooldown_24h")
 
     candidates = candidates_for_abandonment(ab_row["cart_value"], ab_row["attempt_count"])
-    abandoned_dt = datetime.fromisoformat(ab_row["abandoned_at"])
     now_dt = datetime.now()
     scored = score_candidates(
         candidates, amount=ab_row["cart_value"], attempt_count=ab_row["attempt_count"],

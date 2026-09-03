@@ -1,0 +1,68 @@
+[tool.ruff.lint]
+ignore = [
+    # DTZ005 (datetime.now() without tz): this project stores every
+    # timestamp as a naive LOCAL-time ISO string throughout — transactions,
+    # receivables, abandonments, decisions, audit_log, batches, escalations
+    # all use datetime.now() consistently. That's a deliberate, pervasive
+    # convention (not an oversight in any one place), and switching to
+    # tz-aware datetimes would be an invasive, unrequested behavioral change
+    # touching dozens of call sites and every stored timestamp format.
+    "DTZ005",
+
+    # SIM118 (prefer `key in dict` over `key in dict.keys()`): ruff's
+    # suggested rewrite is UNSAFE for this codebase. Rows here are
+    # sqlite3.Row objects (row_factory = sqlite3.Row in schema.py), and
+    # `"col" in row` checks the row's VALUES (like a tuple), not its column
+    # names — `"col" in row.keys()` is the only correct way to check for a
+    # column's existence on a Row. Verified directly:
+    #   row = conn.execute(...).fetchone()  # sqlite3.Row
+    #   "a" in row.keys()  -> True  (correct: checks column names)
+    #   "a" in row         -> False (WRONG: checks values instead)
+    # Applying ruff's autofix here would silently break every defensive
+    # column-existence check in the codebase (e.g. the Phase 1/3
+    # backward-compatible `"recovered_amount" in row.keys()` /
+    # `"promise_status" in row.keys()` checks).
+    "SIM118",
+
+    # BLE001 (blind `except Exception`): intentional in this project's
+    # top-level `if __name__ == "__main__":` test-runner blocks (every
+    # test file's plain-Python fallback runner catches Exception broadly on
+    # purpose, to report every failing test rather than stopping at the
+    # first one) and in a couple of genuine top-level error-boundary spots
+    # (e.g. the /api/health check, which should return 503 on ANY DB
+    # failure, not just specific exception types).
+    "BLE001",
+
+    # SIM115 (use a context manager for opening files): every test file's
+    # `_make_temp_db()` helper uses `tempfile.NamedTemporaryFile(delete=False)`
+    # then closes it immediately — the file is deliberately left on disk
+    # (not auto-deleted) so it can be reopened by sqlite3 as a real path
+    # afterward, and cleaned up explicitly in a `finally` block. A context
+    # manager here would delete the file on `__exit__`, which is the
+    # opposite of what these tests need.
+    "SIM115",
+
+    # RUF100 (unused `noqa` directive): the test files' `# noqa: E402`
+    # comments document *why* those imports aren't at the top of the file
+    # (they intentionally patch `config.DB_PATH`/`schema.DB_PATH` before
+    # importing modules that read it at import time — see each test's own
+    # comments) even though this ruff version/config doesn't currently have
+    # E402 enabled to actually need them. Left as documentation for anyone
+    # running a stricter ruff config, rather than churned for a
+    # zero-functional-value removal.
+    "RUF100",
+
+    # RUF012 (mutable default value for class attribute): the couple of
+    # class-level dict "constants" this fires on (e.g.
+    # execution.py's RETRY_SUCCESS_PROB, logging_config.py's RESERVED) are
+    # used as fixed, disclosed lookup tables, never mutated at runtime —
+    # not a genuine shared-mutable-state risk in how they're actually used.
+    "RUF012",
+
+    # PLW0127 (self-assignment): agent_loop.py's
+    # `SAFETY_ITERATION_CAP = SAFETY_ITERATION_CAP` is a deliberate
+    # re-export of the config value as this module's own attribute (so
+    # tests can patch/read `agent_loop.SAFETY_ITERATION_CAP`), not a
+    # pointless no-op.
+    "PLW0127",
+]

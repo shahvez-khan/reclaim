@@ -46,9 +46,9 @@ import random
 from datetime import datetime
 from typing import Protocol
 
-from schema import get_connection, get_current_batch_id
-from config import RAZORPAY_API_KEY, RAZORPAY_WEBHOOK_SECRET, PAYMENT_EXECUTOR
 from candidate_actions import DISCOUNT_PCT
+from config import PAYMENT_EXECUTOR, RAZORPAY_API_KEY, RAZORPAY_WEBHOOK_SECRET
+from schema import get_connection, get_current_batch_id
 
 random.seed(123)  # reproducible demo outcomes, independent from data-gen seed
 
@@ -440,7 +440,7 @@ def run_execution(types=("transaction", "receivable", "abandonment")):
         print(f"  Receivables-only recovery rate:   {recv_recovered/recv_total*100:.1f}%  (₹{recv_recovered:,.2f} / ₹{recv_total:,.2f})")
     if aband_total:
         print(f"  Abandonments-only recovery rate:  {aband_recovered/aband_total*100:.1f}%  (₹{aband_recovered:,.2f} / ₹{aband_total:,.2f})")
-    print(f"\nOutcome buckets:")
+    print("\nOutcome buckets:")
     for k, v in bucket_counts.items():
         print(f"  {k:<20} {v}")
     print(f"\nStopping-rule triggers:      {stopping_rule_triggers}")

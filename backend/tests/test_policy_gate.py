@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from decision import hard_policy_gate, COOLDOWN_HOURS, MAX_ATTEMPTS
+from decision import COOLDOWN_HOURS, MAX_ATTEMPTS, hard_policy_gate
 
 
 def make_row(**overrides):

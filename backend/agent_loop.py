@@ -22,10 +22,10 @@ decision.py / execution.py, per the priority scoping agreed with the user.
 import json
 from datetime import datetime
 
-from schema import get_connection, get_current_batch_id, upsert_escalation
-from decision import decide_transaction, MAX_ATTEMPTS
 from config import SAFETY_ITERATION_CAP
+from decision import decide_transaction
 from execution import execute_decision
+from schema import get_connection, get_current_batch_id, upsert_escalation
 
 AUTOMATED_ACTIONS = {"retry_payment", "send_update_link"}
 SAFETY_ITERATION_CAP = SAFETY_ITERATION_CAP  # re-exported from config.py — defensive upper bound; real termination is via MAX_ATTEMPTS/candidate exhaustion

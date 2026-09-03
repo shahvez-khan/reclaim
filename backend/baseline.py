@@ -28,8 +28,8 @@ against agent-mutated state.
 
 import random
 
-from schema import get_connection
 from decision import hard_policy_gate
+from schema import get_connection
 
 random.seed(999)  # independent of data-gen (42) and execution (123) seeds
 

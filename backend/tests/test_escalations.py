@@ -45,9 +45,9 @@ def test_escalations_table_exactly_matches_escalate_to_human_decisions():
         schema.init_db(reset=True)
 
         import generate_data
-        from diagnosis import run_diagnosis
         from agent_loop import run_agent_loop_for_all_transactions
         from decision import run_decisions
+        from diagnosis import run_diagnosis
         from execution import run_execution
 
         generate_data.populate()

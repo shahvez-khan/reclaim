@@ -10,12 +10,10 @@ deterministic and independent of it.
 
 import json
 from functools import lru_cache
-from pathlib import Path
 
 import joblib
 import pandas as pd
-
-from config import MODEL_PATH, MODEL_METADATA_PATH, MODEL_SCALER_PATH
+from config import MODEL_METADATA_PATH, MODEL_PATH, MODEL_SCALER_PATH
 
 
 @lru_cache(maxsize=1)

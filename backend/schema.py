@@ -7,7 +7,6 @@ SQLite chosen over JSON because:
 """
 
 import sqlite3
-from pathlib import Path
 
 from config import DB_PATH
 
@@ -215,9 +214,9 @@ def create_batch(conn, record_counts: dict) -> str:
     run (transactions/receivables/checkout_abandonments, and downstream every
     diagnosis/decision/audit_log row derived from them) with this same ID —
     see generate_data.py::populate() and get_current_batch_id() below."""
+    import json as _json
     import uuid as _uuid
     from datetime import datetime as _datetime
-    import json as _json
 
     batch_id = f"batch_{_uuid.uuid4().hex[:12]}"
     conn.execute(
