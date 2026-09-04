@@ -15,6 +15,7 @@ feature selection (pre-action fields only), which is enforced above.
 """
 
 import json
+from pathlib import Path
 
 import joblib
 import pandas as pd
@@ -30,6 +31,16 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+
+# Anchored to the repo root (not CWD) — same convention as backend/config.py's
+# PROJECT_ROOT — so this script works regardless of which directory it's run
+# from. See generate_training_data.py's matching comment.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TRAINING_DATA_PATH = PROJECT_ROOT / "ml" / "training_data.csv"
+MODELS_DIR = PROJECT_ROOT / "models"
+MODEL_PATH = MODELS_DIR / "recovery_model.pkl"
+SCALER_PATH = MODELS_DIR / "feature_scaler.pkl"
+METADATA_PATH = MODELS_DIR / "model_metadata.json"
 
 FEATURE_COLUMNS_CATEGORICAL = ["failure_action", "record_type"]
 # hours_since_last_attempt and is_repeat_failure are the Phase 3 additions —
@@ -100,7 +111,8 @@ def calibration_table(proba, y_test, n_bins: int = 10) -> list[dict]:
 
 
 def train():
-    df = pd.read_csv("ml/training_data.csv", keep_default_na=False, na_values=[""])
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)  # fresh clone won't have this dir — models/*.pkl is gitignored
+    df = pd.read_csv(TRAINING_DATA_PATH, keep_default_na=False, na_values=[""])
     df["days_overdue"] = df["days_overdue"].fillna(-1)
     df["hours_since_last_attempt"] = df["hours_since_last_attempt"].fillna(-1)
     df["is_repeat_failure"] = df["is_repeat_failure"].fillna(0)
@@ -148,8 +160,8 @@ def train():
     for row in calibration:
         print(f"  predicted={row['predicted_mean']:.3f}  actual={row['actual_rate']:.3f}  n={row['n']}")
 
-    joblib.dump(chosen_model, "models/recovery_model.pkl")
-    joblib.dump(scaler, "models/feature_scaler.pkl")
+    joblib.dump(chosen_model, MODEL_PATH)
+    joblib.dump(scaler, SCALER_PATH)
     metadata = {
         "model_type": chosen_name,
         "feature_columns": feature_columns,
@@ -163,11 +175,11 @@ def train():
         "training_data_source": "ml/training_data.csv (synthetic, simulator-generated — see DATA_SOURCES.md)",
         "calibration_deciles": calibration,
     }
-    with open("models/model_metadata.json", "w") as f:
+    with open(METADATA_PATH, "w") as f:
         json.dump(metadata, f, indent=2)
 
-    print("\nSaved model to models/recovery_model.pkl")
-    print("Saved metadata to models/model_metadata.json")
+    print(f"\nSaved model to {MODEL_PATH}")
+    print(f"Saved metadata to {METADATA_PATH}")
 
 
 if __name__ == "__main__":

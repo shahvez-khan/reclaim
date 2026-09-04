@@ -44,12 +44,21 @@ disguise, not real signal.
 """
 
 import random
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 random.seed(7)
 np.random.seed(7)
+
+# Anchored to the repo root (not CWD) — same convention as backend/config.py's
+# PROJECT_ROOT — so this script works whether it's run as `python3
+# generate_training_data.py` from inside ml/, `python3 ml/generate_training_data.py`
+# from the repo root (what docker-entrypoint.sh and the README both do), or
+# from any other directory.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TRAINING_DATA_PATH = PROJECT_ROOT / "ml" / "training_data.csv"
 
 N_BASE_CASES = 3600
 
@@ -271,7 +280,7 @@ def generate():
                 })
 
     df = pd.DataFrame(rows)
-    df.to_csv("ml/training_data.csv", index=False)
+    df.to_csv(TRAINING_DATA_PATH, index=False)
     print(f"Generated {len(df)} (context, candidate_action, outcome) training rows")
     print(f"Overall positive rate: {df['outcome'].mean():.3f}")
     print("\nBy record_type:")
