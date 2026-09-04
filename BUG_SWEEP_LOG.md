@@ -9,7 +9,7 @@ one pass: one category, fully verified, committed.
 |---|---|---|
 | 1 | Fresh-environment reproducibility | ✅ |
 | 2 | CI pipeline, exactly as configured | ✅ |
-| 3 | Docker build & run | ⬜ |
+| 3 | Docker build & run | ❓ |
 | 4 | API input validation & error handling | ⬜ |
 | 5 | SQL / injection / secrets review | ⬜ |
 | 6 | Concurrency & idempotency | ⬜ |
@@ -180,5 +180,90 @@ provably ruled out here — running this workflow for real on
 `push`/`pull_request` (or locally with an actual 3.11 interpreter
 available) is the only way to close this out completely.
 
-**Commit:** (this commit) — "Bug sweep pass 2 — CI pipeline exactly as
-configured: checked, clean (Python 3.11 pin unverifiable in this sandbox)"
+**Commit:** a1112d3 — "Bug sweep pass 2 — CI pipeline exactly as
+configured: checked, clean"
+
+### Pass 3 — Docker build & run — 2026-09-04
+
+**Environment notes:** No Docker daemon available in this sandbox (`docker`
+is not an installed command at all, `docker --version` fails with "not
+found"). Per the loop prompt's explicit instruction for this category, I
+did **not** mark this ✅ or 🛠️ — I did the most rigorous static review I
+could instead, and this is honestly marked ❓.
+
+**What I checked:** Read `Dockerfile`, `docker-compose.yml`,
+`docker-entrypoint.sh`, and `.dockerignore` line by line, then cross-checked
+every path and env var each one references against what the actual
+application code (`config.py`, `schema.py`, `db.py`, `api.py`,
+`train_recovery_model.py`, `generate_training_data.py`) does with it:
+
+- **Path anchoring, not cwd-dependent:** `config.py`'s `PROJECT_ROOT =
+  Path(__file__).parent.parent` resolves to `/app` regardless of the
+  entrypoint's various `cd` calls, and `DB_PATH`, `MODEL_PATH`,
+  `MODEL_METADATA_PATH`, `MODEL_SCALER_PATH`, `LOG_DIR` are all built from
+  it. `train_recovery_model.py` and `generate_training_data.py` do the
+  same independently (`Path(__file__).resolve().parent.parent`), and
+  `api.py`'s `FRONTEND_DIR` is anchored off `Path(__file__).parent` too.
+  Traced every one of these against the entrypoint's own file-existence
+  checks (`/app/data/revenue_recovery.db`, `/app/models/recovery_model.pkl`)
+  and the compose file's volume mounts (`./data:/app/data`,
+  `./models:/app/models`, `./logs:/app/logs`) — all four agree on the same
+  absolute in-container paths. This is exactly the CWD-dependent-path bug
+  class flagged elsewhere in this project's history, and I looked for it
+  specifically here; it doesn't recur in the Docker path either.
+- **Dependency surface:** the image only installs `backend/requirements.txt`
+  (not `requirements-dev.txt`, so no `sqlalchemy`/`pytest`/`ruff` in the
+  runtime image). Confirmed `db.py` — the one module that imports
+  `sqlalchemy` — is (a) never imported by any runtime module (`api.py`,
+  `run_pipeline.py`, `migrate.py`, `generate_data.py`, or anything they
+  import), and (b) does its `sqlalchemy` import lazily inside
+  `get_engine()`, not at module level. So a production image without dev
+  deps genuinely can't crash on that import, by construction.
+- **Entrypoint bootstrap order:** `docker-entrypoint.sh` runs `migrate.py`
+  → `generate_data.py` (only if no DB file exists) → ml training (only if
+  no model file exists) → `exec uvicorn`. Confirmed `api.py` has no
+  startup hook that calls `run_pipeline.py` itself — the decision/execution
+  step only runs via the `/api/run-batch` endpoint (the dashboard's
+  "Re-run batch" button), matching what the README's Docker section
+  actually claims ("bootstraps data + trains the model... then serves the
+  API + dashboard") — it does not claim the pipeline itself auto-runs, so
+  I didn't hold it to a claim it doesn't make. First-load `/api/summary`
+  would show real raw records with zero decisions yet (all zero
+  recovered), which is a sensible, non-crashing empty-ish state, not a bug.
+- **Healthcheck command:** `["CMD", "python", "-c", "import
+  urllib.request; ..."]` — the official `python:3.11-slim` base image does
+  provide an unversioned `python` binary (unlike bare Debian), so this
+  resolves correctly; confirmed by checking the base image's known layout
+  rather than assuming.
+- **`.dockerignore`** correctly excludes `data/`, `models/`, `logs/`,
+  `.git/`, `.github/`, `backend/tests/`, `.env`, and cache dirs — nothing
+  the runtime needs is excluded, and nothing large/irrelevant is shipped
+  into the build context.
+
+**Found:** Nothing, via static review. Every path and env var traced
+consistently end-to-end across all four Docker-related files and the
+application code they drive.
+
+**Fixed:** N/A.
+
+**Verified:** This is explicitly *not* a run-verified result — see below.
+The cross-checks above were done by reading source, not by executing
+`docker build`/`docker compose up`.
+
+**Could not verify:** The actual `docker build` (does the image build at
+all — base image pull, layer caching, `pip install` inside the container's
+own network/DNS), `docker compose up` (do the bind-mount volumes actually
+get created and populated as expected, does the entrypoint script's `set
+-e` + conditionals behave as intended when actually executed by `/bin/sh`
+inside the container), hitting the health endpoint and real routes through
+the running container, and a `down` + `up` cycle to confirm persisted
+volume state survives a restart — **none of this was actually run**, since
+no Docker daemon is reachable in this sandbox. I also could not time the
+healthcheck's `start_period: 30s` against the real bootstrap duration
+inside an actual container (a different runtime environment than this
+sandbox's raw Python). This category needs an environment with Docker
+available to close out for real — running `docker compose up` once, end to
+end, would settle it.
+
+**Commit:** (this commit) — "Bug sweep pass 3 — Docker build & run:
+thorough static review only, no Docker daemon available in this sandbox"
