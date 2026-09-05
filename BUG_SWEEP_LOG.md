@@ -14,7 +14,7 @@ one pass: one category, fully verified, committed.
 | 5 | SQL / injection / secrets review | 🛠️ |
 | 6 | Concurrency & idempotency | 🛠️ |
 | 7 | Financial/data-integrity invariants | ✅ |
-| 8 | Frontend robustness | ⬜ |
+| 8 | Frontend robustness | 🛠️ |
 | 9 | Test suite quality | ⬜ |
 | 10 | Documentation accuracy | ⬜ |
 | 11 | Dead code / stale comments / final polish | ⬜ |
@@ -709,3 +709,98 @@ data with no environment-dependent gaps.
 
 **Commit:** (this commit) — "Bug sweep pass 7 — financial/data-integrity
 invariants: checked, clean across 13 independent batches"
+
+### Pass 8 — Frontend robustness — 2026-09-05
+
+**Environment notes:** No browser available in this sandbox. Verification
+uses the same technique as Pass 4's frontend fix: replaying `app.js`'s
+actual logic verbatim in a Node script against the real running server (or
+a deliberately-killed one), since that exercises the real fetch/parse/
+error-handling code paths rather than reasoning about them from the source
+alone. This closes out two items explicitly deferred here from Pass 4.
+
+**What I checked:**
+- Grepped every `innerHTML =` assignment in `app.js` (23 call sites) and
+  checked each dynamic value against `escapeHtml()` usage. All render
+  functions except one (`loadHeroExamples`) route every DB-sourced field
+  through `escapeHtml()` — records table, escalations list, receipt/audit
+  view, batch dropdown, stopping-rule and failure-code breakdowns all
+  escape consistently.
+- Grepped every `fetch(...)` call site and checked for a `res.ok` check
+  before the body is treated as trusted JSON. Found exactly one gap:
+  `loadHeroExamples()` — the same function flagged (but deliberately left
+  for this pass) in Pass 4.
+- **Reproduced the bug for real**, per the ground rules: confirmed
+  `/api/hero-examples?batch_id=<unknown>` actually 404s
+  (`{"error":{"status":404,...}}`), then replayed `loadHeroExamples()`'s
+  *original* logic verbatim in a Node script against that real response —
+  it threw `TypeError: examples.map is not a function`, because the code
+  read the error body as if it were the expected array (`examples.length
+  === 0` silently evaluated to `undefined === 0` → false, falling through
+  to `.map()` on a plain object). This is a realistic failure mode, not a
+  contrived one: `currentBatchId` is a plain JS global that can go stale
+  relative to the server (e.g., another tab or a server-side reseed
+  changes which batches exist).
+- **Simulated "kill the backend mid-load, reload the page"**: killed the
+  real uvicorn process, then replayed both the pre-existing
+  `loadSummary`-style logic and the (at-that-point-still-original)
+  `loadHeroExamples` logic against the dead server — confirmed the network
+  failure (`fetch failed`) is caught internally by every loader that has a
+  `try/catch`, which was every loader except `loadHeroExamples`.
+- Checked empty-list handling elsewhere: `loadRecords` shows "No records
+  in this bucket", `loadEscalations` shows "No open escalations", batch
+  dropdown shows "No batches yet" — all already correctly guarded, not
+  just assumed to be.
+- Checked `renderReceipt`'s null-safety around optional fields
+  (`diagnosis`, `dec.retry_at`, `dec.stopping_rule_fired`, `outcome`) —
+  all conditionally rendered with a `—` fallback, not accessed unguarded.
+
+**Found:** `loadHeroExamples()` was the only loader in the file with (a)
+no `try/catch` at all, and (b) no `res.ok` check — so any non-2xx response
+(stale batch_id, backend down, backend restarting) produced an uncaught
+`TypeError` instead of the friendly degraded state every other section of
+the dashboard shows. Also, as flagged in Pass 4: its render skipped
+`escapeHtml()` for `label`/`blurb`/`record_id`, inconsistent with every
+other render function in the file (no live injection path today, since
+Pass 4 confirmed those specific fields are hardcoded backend constants —
+but inconsistent defensive coding that would become a real gap the moment
+that endpoint's data source changes).
+
+**Fixed:** Rewrote `loadHeroExamples()` to match the file's established
+pattern: wrapped in `try/catch`, checks `res.ok` before trusting the body,
+and routes `label`/`blurb`/`record_id` through `escapeHtml()` like every
+sibling render function. On failure, it clears the row quietly (logging to
+console) rather than showing a visible error banner — a deliberate choice,
+not an oversight: this widget is a supplementary "walk through a live
+example" prompt, not critical data, so a quiet degrade is more appropriate
+than a red error banner competing for attention with the real dashboard
+sections that do use the louder "Couldn't load X. Retry" pattern.
+
+**Verified:**
+- Replayed the **fixed** `loadHeroExamples()` logic against the exact
+  previously-crashing scenario (`batch_id=nonexistent_batch` → 404):
+  `CAUGHT: HTTP 404 (row cleared, no crash)` — no exception escapes.
+- Replayed the same fixed logic against a normal successful call (current
+  batch, no `batch_id` param): correctly renders all three example labels,
+  unaffected by the fix.
+- Sanity-checked `escapeHtml()` against a real injection payload
+  (`<img src=x onerror=alert(1)>`) → correctly neutralized to
+  `&lt;img src=x onerror=alert(1)&gt;`.
+- Re-grepped every `fetch(...)` call site after the fix: all now check
+  `res.ok` before parsing — the hero-examples gap was the last one.
+- Killed the real backend again post-fix and replayed the fixed logic:
+  network failure caught internally, consistent with every other loader.
+- Ran the full backend suite (no backend code changed this pass, frontend
+  has no automated test suite to run): **39 passed, 0 failed** — confirms
+  the frontend-only change didn't require or break any backend contract.
+
+**Could not verify:** No real browser is available in this sandbox, so
+this is Node-script replay of the actual `app.js` logic against a real
+server, not a true end-to-end click-through in a rendered page (same
+caveat as Pass 4's frontend fix). A real browser session — checking the
+DOM actually updates correctly, no console errors on a live reload, etc.
+— would be the fullest verification.
+
+**Commit:** (this commit) — "Bug sweep pass 8 — frontend robustness: fix
+loadHeroExamples' missing error handling and escaping (reproduced the
+crash first)"

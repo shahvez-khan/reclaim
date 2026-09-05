@@ -480,23 +480,34 @@ document.getElementById("runBatchBtn").addEventListener("click", async (e) => {
 });
 
 async function loadHeroExamples() {
-  const qs = currentBatchId ? `?batch_id=${encodeURIComponent(currentBatchId)}` : "";
-  const res = await fetch(`${API}/api/hero-examples${qs}`);
-  const examples = await res.json();
   const el = document.getElementById("heroExamplesRow");
-  if (examples.length === 0) { el.innerHTML = ""; return; }
-  el.innerHTML = `<div class="hero-examples-label">Walk through a live example</div>
-    <div class="hero-examples-cards">
-    ${examples.map(e => `
-      <button class="hero-example-card" data-id="${e.record_id}">
-        <span class="hero-example-title">${e.label}</span>
-        <span class="hero-example-blurb">${e.blurb}</span>
-      </button>
-    `).join("")}
-    </div>`;
-  el.querySelectorAll(".hero-example-card").forEach(btn => {
-    btn.addEventListener("click", () => openReceipt(btn.dataset.id));
-  });
+  try {
+    const qs = currentBatchId ? `?batch_id=${encodeURIComponent(currentBatchId)}` : "";
+    const res = await fetch(`${API}/api/hero-examples${qs}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const examples = await res.json();
+    if (examples.length === 0) { el.innerHTML = ""; return; }
+    el.innerHTML = `<div class="hero-examples-label">Walk through a live example</div>
+      <div class="hero-examples-cards">
+      ${examples.map(e => `
+        <button class="hero-example-card" data-id="${escapeHtml(e.record_id)}">
+          <span class="hero-example-title">${escapeHtml(e.label)}</span>
+          <span class="hero-example-blurb">${escapeHtml(e.blurb)}</span>
+        </button>
+      `).join("")}
+      </div>`;
+    el.querySelectorAll(".hero-example-card").forEach(btn => {
+      btn.addEventListener("click", () => openReceipt(btn.dataset.id));
+    });
+  } catch (err) {
+    // Previously this function had no try/catch at all (the only loader in
+    // this file without one) and never checked res.ok — a stale/invalid
+    // batch_id produced an uncaught "examples.map is not a function"
+    // instead of the friendly empty/error state every other section shows.
+    // See BUG_SWEEP_LOG.md pass 8.
+    console.error("Failed to load hero examples:", err.message);
+    el.innerHTML = "";  // this row is a nice-to-have walkthrough aid, not critical data — fail quiet, not with a visible error banner
+  }
 }
 
 function fmtAge(hours) {
