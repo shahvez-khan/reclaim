@@ -33,6 +33,6 @@ Timed for spoken delivery — read it out loud once before presenting; scripts t
 ## Notes for the presenter
 
 - The exact ₹ numbers move a little between runs (each "Re-run batch" mints a fresh, additively-generated batch — it does NOT erase the batch you just showed; the batch-history dropdown in the header lets you flip back to it if you need to). Don't memorize exact figures, just gesture at the panels.
-- The Baseline vs. Agent panel now shows a 95% CI per category, not just a headline %. Don't claim "the agent beats baseline everywhere" — say what the panel actually says (significant vs. not-yet-significant at current sample size). That honesty is a feature, not a hedge — lean into it if asked a hard question.
+- The Baseline vs. Agent panel now shows a 95% CI per category, not just a headline %. Don't claim "the agent beats baseline everywhere" — say what the panel actually says (significant vs. not-yet-significant at current sample size, and for abandonments specifically, currently a negative point estimate — see README's Baseline vs. AI Agent section for why). That honesty is a feature, not a hedge — lean into it if asked a hard question.
 - If the "Re-plan then recover" hero card isn't available on a given run (rare), any of the three hero cards works — all three map directly to a beat in this script.
 - Have the dashboard already loaded before starting the timer; don't demo the page load itself.

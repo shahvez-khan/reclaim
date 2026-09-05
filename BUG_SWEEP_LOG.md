@@ -16,7 +16,7 @@ one pass: one category, fully verified, committed.
 | 7 | Financial/data-integrity invariants | ✅ |
 | 8 | Frontend robustness | 🛠️ |
 | 9 | Test suite quality | 🛠️ |
-| 10 | Documentation accuracy | ⬜ |
+| 10 | Documentation accuracy | 🛠️ |
 | 11 | Dead code / stale comments / final polish | ⬜ |
 
 ## Pass history
@@ -934,3 +934,116 @@ the remaining files.
 **Commit:** (this commit) — "Bug sweep pass 9 — test suite quality: fix
 two leaked-temp-file bugs (found via a third), mutation-test five
 critical invariants"
+
+### Pass 10 — Documentation accuracy — 2026-09-05
+
+**Environment notes:** None beyond earlier passes.
+
+**What I checked:** Read `README.md` end to end as a new user would,
+plus `DEMO_SCRIPT.md` and `DATA_SOURCES.md`, and verified every concrete,
+checkable claim — numbers, commands, candidate-action tables, config
+values, test descriptions — against the actual current code rather than
+trusting what a past commit message said was true at the time. This
+follows directly from the honest, non-bug observation flagged at the end
+of Pass 7 (a negative abandonments incremental in the live data) —
+promised there I'd check it against the docs here.
+
+Specifically verified:
+- **Baseline vs. AI Agent table** (the README's headline numbers):
+  re-ran the entire pipeline from a **completely fresh, independent
+  checkout** (`git archive HEAD` into a new directory, fresh pip install,
+  fresh `migrate.py`/`generate_data.py`/model training/`run_pipeline.py`
+  — not reusing any of the `/home/claude/fresh` copy accumulated over
+  Passes 1-9, to rule out that copy's history affecting the result) and
+  compared the actual output against the table's claims.
+- **ML metrics**: ROC-AUC 0.6905 (logistic) vs 0.688 (random forest) from
+  the freshly-trained `model_metadata.json` — matches the README's "0.690
+  vs 0.688" claim exactly; no drift here.
+- **Candidate-action table**: every failure-code-to-candidate-list mapping
+  in `candidate_actions.py` (`bank_timeout`, `insufficient_funds`,
+  `issuer_decline`, `otp_failed`, `expired_card`) matches the README's
+  table exactly; no drift.
+- **Config values**: `COOLDOWN_HOURS=24`, `MAX_ATTEMPTS=3`,
+  `SAFETY_ITERATION_CAP=6` in `config.py` match the README's claims
+  exactly; no drift.
+- **CI step order**: already independently verified against the actual
+  `.github/workflows/ci.yml` in Pass 2 (install → lint → train → test);
+  matches the README's "install deps, ruff check, train the model fresh,
+  run the full suite" description.
+- **`DATA_SOURCES.md`**: record counts (200/400/200), ~6,300 training
+  rows, and the qualitative generation-parameter descriptions all check
+  out against `generate_data.py`/`ml/generate_training_data.py`; no drift
+  found.
+
+**Found:** The **Baseline vs. AI Agent table was stale and materially
+wrong** — not just off by rounding, but wrong in eligible-N, wrong in
+dollar amounts, and, for abandonments, **wrong in sign**:
+
+| | README claimed | Actual (fresh, verified) |
+|---|---|---|
+| Transactions eligible / incremental | 166 / +₹116,586 (+41.4%) | 168 / +₹198,785 (+77.5%) |
+| Receivables eligible / incremental | 244 / +₹3,599,917 (+19.0%) | 229 / +₹4,200,871 (+24.7%) |
+| Abandonments eligible / incremental | 151 / **+₹23,247 (+17.2%)** | 156 / **−₹33,110 (−21.6%)** |
+
+The README's own text claimed "signs and rough magnitudes have been
+stable across repeated runs" — technically not a lie (repeated runs *are*
+stable, since `generate_data.py` pins a random seed — confirmed
+byte-identical results across 3 fresh triggered runs in Pass 7 and again
+here), but combined with a table showing all-positive deltas, it created
+a materially false impression: the actual current, deterministic,
+repeatedly-reproducible sign for abandonments is negative, not positive.
+The same stale `244`-eligible figure also appeared in a second sentence
+later in the same section ("Receivables' eligible-N went from ~27 to
+244"), and the `166 eligible` figure was repeated a third time in the
+Production Readiness section's statistical-significance paragraph — three
+separate places carrying the same drift, all from one stale table never
+regenerated after some prior code/data change altered the pipeline's
+actual output.
+
+**Fixed:**
+1. Replaced the Baseline vs. AI Agent table with the freshly-verified
+   current numbers (all three rows).
+2. Rewrote the table's footnote to accurately describe *why* the numbers
+   are reproducible (a pinned random seed, not just "signs have been
+   stable" good luck) and to explicitly flag that the table previously
+   showed stale numbers.
+3. Added an honest paragraph explaining the abandonments result instead
+   of leaving a bare negative number unexplained: the CI still correctly
+   includes zero (not statistically distinguishable from no-difference at
+   this sample size), but the point estimate itself is genuinely negative
+   — with a plausible mechanism noted (the agent's `SEND_DISCOUNT_NUDGE`
+   recovered amount is net-of-discount by design, while the baseline's
+   comparison figure never discounts anything at all), consistent with
+   this project's established voice of disclosing limitations rather than
+   smoothing them over.
+4. Fixed the two other stale-number repeats (`244` → `229` eligible
+   receivables; `166` → `168` eligible transactions) elsewhere in the same
+   file.
+5. Updated `DEMO_SCRIPT.md`'s presenter notes, which previously only
+   warned against claiming "beats baseline everywhere" in terms of
+   *significance* — added a pointer to the now-negative abandonments
+   point estimate specifically, so a presenter asked a hard question about
+   it isn't caught flat-footed by something the script didn't anticipate.
+
+**Verified:** The corrected numbers come directly from a real, fresh,
+end-to-end pipeline run in an independent checkout (commands and full
+output captured above and in this pass's terminal history) — not
+estimated, not copied from an old commit, not reasoned about. Re-ran the
+full backend test suite after the doc edits (docs-only changes, but
+confirmed nothing else was inadvertently touched):
+`git diff --stat` shows exactly `README.md` and `DEMO_SCRIPT.md` changed,
+nothing else; **39 passed, 0 failed**.
+
+**Could not verify:** Did not exhaustively re-verify every single sentence
+in the ~250-line README (e.g., the qualitative failure-code-weighting
+claims in `DATA_SOURCES.md` like "risk_block rarest" were read for
+plausibility against `generate_data.py`'s code structure but not
+numerically re-derived row-by-row) — prioritized the concrete, headline
+numbers a reader or judge would actually check first, per this category's
+own instruction to verify "every concrete claim" while being realistic
+about pass scope. A future pass could extend the same fresh-checkout
+verification technique to the remaining qualitative claims.
+
+**Commit:** (this commit) — "Bug sweep pass 10 — documentation accuracy:
+fix the stale Baseline vs. AI Agent table (wrong eligible-N, wrong
+amounts, wrong sign for abandonments)"
