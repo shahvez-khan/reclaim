@@ -26,13 +26,6 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
-def _bool(name: str, default: bool) -> bool:
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    return val.strip().lower() in ("1", "true", "yes", "on")
-
-
 # --- Database ---
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./data/revenue_recovery.db")
 # Kept for the existing sqlite3-based schema.py, which uses a filesystem path
