@@ -11,6 +11,7 @@ to always fail — so it's exercising the real loop logic, not a mock of it.
 Run with pytest, or directly via `python3 -m tests.test_agent_loop_termination`.
 """
 
+import atexit
 import sys
 import tempfile
 from datetime import datetime
@@ -29,6 +30,15 @@ def _make_temp_db():
 
 DB_PATH_OVERRIDE = _make_temp_db()
 _config.DB_PATH = DB_PATH_OVERRIDE
+# Every sibling test file cleans up its temp DB in a try/finally around its
+# (single) test function; this file's DB is module-level, shared by two
+# test functions, so there's no single function body to wrap. Confirmed
+# (see BUG_SWEEP_LOG.md pass 9) that under pytest — as opposed to this
+# file's standalone `if __name__ == "__main__"` runner, whose own cleanup
+# at the bottom only runs in that path — nothing was ever deleting this
+# file, leaking one temp .db per pytest invocation. atexit covers both
+# entry points with one line.
+atexit.register(lambda: DB_PATH_OVERRIDE.unlink(missing_ok=True))
 
 import schema  # noqa: E402
 

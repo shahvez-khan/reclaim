@@ -15,7 +15,7 @@ one pass: one category, fully verified, committed.
 | 6 | Concurrency & idempotency | 🛠️ |
 | 7 | Financial/data-integrity invariants | ✅ |
 | 8 | Frontend robustness | 🛠️ |
-| 9 | Test suite quality | ⬜ |
+| 9 | Test suite quality | 🛠️ |
 | 10 | Documentation accuracy | ⬜ |
 | 11 | Dead code / stale comments / final polish | ⬜ |
 
@@ -804,3 +804,133 @@ DOM actually updates correctly, no console errors on a live reload, etc.
 **Commit:** (this commit) — "Bug sweep pass 8 — frontend robustness: fix
 loadHeroExamples' missing error handling and escaping (reproduced the
 crash first)"
+
+### Pass 9 — Test suite quality — 2026-09-05
+
+**Environment notes:** None beyond earlier passes.
+
+**What I checked:**
+
+**Flakiness.** Ran the full suite 5x in a row, then once more in reverse
+file order, then once more per-file in isolation (9 separate invocations)
+— **39/39 passed every single time**, no timing-dependent failures, no
+unseeded-randomness flakiness, no order-dependent state leaking between
+test files.
+
+**Temp-resource hygiene.** While checking for shared-state leakage between
+files, noticed every test file monkeypatches `config.DB_PATH`/
+`schema.DB_PATH` to a fresh `tempfile.NamedTemporaryFile` and is supposed
+to clean it up afterward. Most files do this correctly with a
+`try/finally` wrapped around their single test function. Two files —
+`test_agent_loop_termination.py` and `test_stopping_rule_coverage.py` —
+create the temp DB at **module level** (shared across their two test
+functions each) and only unlink it inside their `if __name__ ==
+"__main__":` standalone-runner block, which never executes under `pytest`.
+**Found and confirmed both leak one `.db` file per pytest invocation:**
+cleared `/tmp/*.db`, ran each file under pytest, watched the count go
+0→1 each time, for both files independently.
+
+**Can the tests actually fail? (mutation testing).** Per the ground
+rules' explicit instruction, temporarily broke the code five different
+tests are supposed to protect and confirmed each one actually catches it
+— not just assumed a passing test means working protection:
+
+1. `decision.py`'s `MAX_ATTEMPTS` policy-gate check (`if
+   row["attempt_count"] >= MAX_ATTEMPTS:`) → disabled it
+   (`if False:`). **`test_agent_loop_termination.py`'s two tests still
+   passed** — a real, narrow blind spot: `issuer_decline` (the failure
+   code both tests use) has exactly 3 candidate actions, exactly equal to
+   `MAX_ATTEMPTS=3`, so candidate-exhaustion always ties with or beats
+   `MAX_ATTEMPTS` for that specific scenario, masking the mutation
+   entirely — this file's own docstring already says it's testing overall
+   termination, not `MAX_ATTEMPTS`'s own correctness specifically, so
+   this isn't a design flaw in that file, just a scope note worth
+   recording. Checked whether the *suite as a whole* is blind to this
+   regression before concluding anything: **`test_policy_gate.py`
+   correctly failed 3 tests** against the identical mutation — it has a
+   dedicated `test_max_attempts_escalates()` that exercises this exact
+   branch directly, independent of candidate exhaustion. So the suite
+   does catch this regression; it's just that any one integration test
+   testing a different concern (loop termination generally, not
+   `MAX_ATTEMPTS` specifically) isn't required to duplicate that
+   coverage. Restored `decision.py`, re-ran both files to confirm clean.
+2. `execution.py`'s discount accounting (`recovered_amount = amount *
+   (1 - DISCOUNT_PCT)` → `recovered_amount = amount`, dropping the
+   discount entirely) → **`test_discount_recovery_accounting.py` failed
+   correctly**, and its own printed audit-trail output visibly showed the
+   bug (a ₹5,000 cart "recovered after a 12% discount" for the full
+   ₹5,000, not the discounted amount). Restored, re-verified clean.
+3. `stats.py`'s significance logic (`(lower > 0) or (upper < 0)` →
+   `(lower > 0) and (upper < 0)`, a classic wrong-boolean-operator bug)
+   → **`test_stats.py` failed correctly** on the specific test targeting
+   a clearly-significant difference. Restored, re-verified clean.
+4. `generate_data.py`'s historical data-wiping regression
+   (`init_db(reset=False)` → `init_db(reset=True)`, reintroducing the
+   exact Phase-2 bug `test_batch_durability.py`'s own docstring
+   describes) → first attempt at this mutation accidentally landed inside
+   a comment (`content.replace()` matched the wrong occurrence of the
+   same string, since the surrounding comment quotes the exact code
+   line) — caught this by re-`grep`ing the file before trusting the "it
+   passed" result, rather than taking a passing test at face value; a
+   good reminder that mutation testing itself needs the same
+   verification discipline as any other check. Fixed the mutation to
+   target the actual code line, re-ran: **`test_batch_durability.py`
+   correctly failed** (`test_pipeline_runs_are_additive_not_destructive`),
+   exactly reproducing the historical bug it exists to catch. Restored,
+   confirmed clean, `git status --short` showed only the intended fix
+   files, and the full suite passed (39/39) with `generate_data.py`
+   byte-identical to its pre-mutation state.
+
+**Found:**
+1. Two test files (`test_agent_loop_termination.py`,
+   `test_stopping_rule_coverage.py`) leak a temp `.db` file per pytest
+   run — real resource-hygiene bugs, low severity but genuine, and
+   inconsistent with the established pattern every other test file in the
+   suite correctly follows.
+2. `test_agent_loop_termination.py` cannot, by itself, distinguish a
+   `MAX_ATTEMPTS`-enforcement regression from correct candidate-exhaustion
+   behavior, because its chosen scenario ties the two mechanisms exactly
+   — documented above as a scope note rather than a fix, since
+   `test_policy_gate.py` already covers this specific regression class
+   directly and correctly.
+
+**Fixed:** Added `atexit.register(lambda: DB_PATH_OVERRIDE.unlink(
+missing_ok=True))` right after each file's module-level temp-DB creation,
+in both `test_agent_loop_termination.py` and
+`test_stopping_rule_coverage.py` — covers both the pytest entry point and
+the standalone `__main__` runner with one line, without restructuring
+either file's existing module-level setup pattern.
+
+**Verified:**
+- Cleared `/tmp/*.db`, ran each fixed file under pytest: **0 leaked
+  files**, for both, where before the fix each leaked exactly 1.
+- Re-ran each file's standalone `python3 -m tests.<name>` runner after the
+  fix: still passes, still cleans up (now redundantly via both `atexit`
+  and the pre-existing explicit `unlink()` in the `__main__` block —
+  `unlink(missing_ok=True)` is idempotent, so no issue calling it twice).
+- `ruff check backend/ ml/` initially flagged the added `import atexit` as
+  unsorted (caught this via a real lint run, not assumed clean) — fixed
+  the import order in both files, re-ran ruff: all checks passed.
+- Ran the full suite fresh once more after both fixes: **39 passed, 0
+  failed**, and `/tmp/*.db` count stayed at 0 throughout the whole run.
+- All five mutation-testing exercises above were verified by actually
+  running the specific test file against the actual broken code and
+  observing a real failure with a real, inspected error message — then
+  restoring the original file byte-for-byte (from a `/tmp` backup copy
+  made before each mutation) and re-confirming a clean pass, rather than
+  reasoning about what a mutation "should" do.
+
+**Could not verify:** N/A for the two fixes made. Not exhaustively
+mutation-tested: the remaining ~30 of 39 tests across `test_escalations.py`,
+`test_promise_to_pay.py`, and `test_pipeline_invariant.py` were not each
+individually mutation-tested in this pass — the five exercises above were
+chosen to sample the highest-stakes invariants (safety-cap termination,
+financial accounting, statistical significance, data durability) across
+different files and failure modes rather than exhaustively covering every
+assertion in the suite, given the time a full mutation-testing pass over
+all 39 tests would take. A future pass could extend this same technique to
+the remaining files.
+
+**Commit:** (this commit) — "Bug sweep pass 9 — test suite quality: fix
+two leaked-temp-file bugs (found via a third), mutation-test five
+critical invariants"

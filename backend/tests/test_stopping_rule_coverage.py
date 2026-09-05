@@ -22,6 +22,7 @@ stopping_rule_fired value comes back, not None.
 Run with pytest, or directly via `python3 -m tests.test_stopping_rule_coverage`.
 """
 
+import atexit
 import sys
 import tempfile
 from datetime import datetime
@@ -40,6 +41,11 @@ def _make_temp_db():
 
 DB_PATH_OVERRIDE = _make_temp_db()
 _config.DB_PATH = DB_PATH_OVERRIDE
+# Same fix as test_agent_loop_termination.py (see BUG_SWEEP_LOG.md pass 9):
+# this file's temp DB is module-level, and its only unlink() call lived in
+# the if __name__ == "__main__" block below, never running under pytest —
+# confirmed this leaked one temp .db per pytest invocation before this fix.
+atexit.register(lambda: DB_PATH_OVERRIDE.unlink(missing_ok=True))
 
 import schema  # noqa: E402
 
