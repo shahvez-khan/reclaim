@@ -12,7 +12,7 @@ one pass: one category, fully verified, committed.
 | 3 | Docker build & run | ❓ |
 | 4 | API input validation & error handling | 🛠️ |
 | 5 | SQL / injection / secrets review | 🛠️ |
-| 6 | Concurrency & idempotency | ⬜ |
+| 6 | Concurrency & idempotency | 🛠️ |
 | 7 | Financial/data-integrity invariants | ⬜ |
 | 8 | Frontend robustness | ⬜ |
 | 9 | Test suite quality | ⬜ |
@@ -506,3 +506,108 @@ git repository, not just reasoned about.
 **Commit:** (this commit) — "Bug sweep pass 5 — SQL/secrets review: add
 .env to .gitignore, stop leaking pipeline tracebacks in run-batch's 500
 response"
+
+### Pass 6 — Concurrency & idempotency — 2026-09-04
+
+**Environment notes:** None beyond earlier passes.
+
+**What I checked:** `run_pipeline.py`'s own docstring makes an explicit
+correctness claim: "the real production risk of calling /api/run-batch
+twice concurrently is two pipeline runs processing (and
+double-charging/double-messaging) the same records at once... this is
+guarded with a simple file-based lock: a second concurrent
+run_full_pipeline() call fails fast." I read `_acquire_lock()` to check
+whether that guarantee actually holds under real concurrent load, per this
+category's explicit instruction not to just reason about locks but to
+spawn real parallel callers.
+
+The original implementation was:
+```python
+if PIPELINE_LOCK_PATH.exists():
+    ...raise...
+PIPELINE_LOCK_PATH.write_text(str(os.getpid()))
+```
+— a classic check-then-act sequence: two separate statements, not one
+atomic operation.
+
+**First attempt (and an honest note on a flawed methodology):** I first
+tested this with 30 `multiprocessing` processes released via a
+`Barrier`, each holding the lock for only 0.05s if acquired. This showed
+2–5 of 30 "acquiring" the lock per trial — but re-examining that result,
+I realized it was a **measurement artifact, not a real race**: with 30
+freshly-forked processes each importing seven heavy modules
+(scikit-learn, pandas, etc.), the *arrival* at the lock-check line is
+staggered by tens of milliseconds across processes — comfortably longer
+than the 0.05s hold — so a "second acquirer" was often just legitimately
+reacquiring a lock the first holder had already released, not racing it
+at the same instant. Re-running the identical test with a 3-second hold
+(long enough that arrival-time jitter can no longer matter) gave a clean
+1-of-30 every trial, on **both** the original and fixed code — meaning my
+first test didn't actually prove what I initially wrote. Flagging this
+here explicitly per the ground rules ("don't trust a prior pass's summary
+text over your own fresh verification" applies to my own mid-pass work
+too) rather than quietly discarding the mistake.
+
+**Second attempt — a methodologically sound proof:** the standard
+technique for proving a TOCTOU (time-of-check-to-time-of-use) bug is real,
+independent of how fast a given machine happens to execute the two
+statements, is to artificially widen the gap between the check and the
+act with a sleep — standing in for a context switch, GC pause, scheduler
+preemption, or slow filesystem landing at that exact point, none of which
+the original code has any defense against. I wrote `/tmp/prove_toctou.py`:
+10 processes released simultaneously via a `Barrier`, each running the
+*exact* original check-then-act logic with a 0.3s sleep inserted between
+the `exists()` check and the write. Result: **10 of 10 processes
+"acquired" the lock** — conclusively proving the file-existence check
+provides no actual synchronization; any real-world delay of a few hundred
+milliseconds between the two statements (plausible under real load, a
+busier disk, or a container host under CPU pressure) would let multiple
+pipeline runs process the same records concurrently, exactly the
+double-charging/double-messaging risk the docstring claims is prevented.
+
+**Found:** `run_pipeline.py`'s `_acquire_lock()` is a genuine
+check-then-act race, not an atomic lock, contradicting its own docstring's
+correctness claim.
+
+**Fixed:** Rewrote `_acquire_lock()` to use `os.open(path, os.O_CREAT |
+os.O_EXCL | os.O_WRONLY)` — atomic at the OS/kernel level; POSIX
+guarantees only one caller can win the create when multiple race it, with
+no window between "check" and "act" because there is no separate check —
+the attempt-and-claim happen in one syscall. Preserved the existing
+stale-lock-reclaim behavior (a lock file older than 600s is treated as a
+crashed prior run) with a bounded retry loop for the much narrower,
+lower-stakes race of two processes reclaiming the *same* stale lock at
+once.
+
+**Verified:**
+- Re-ran `/tmp/prove_toctou.py`'s identical sleep-widening technique
+  against the **fixed** logic (same artificial delay, inserted at the
+  analogous point right before the `os.open` call): **1 of 10** acquired,
+  every time — proving the atomicity comes from the syscall itself and is
+  unaffected by what runs around it, not from lucky timing.
+- Re-ran the corrected (3-second hold, no false-positive-prone short
+  hold) 30-process concurrent test from the first attempt against the
+  fixed code: **exactly 1 of 30** acquired simultaneously, consistent
+  across 5 trials.
+- Ran the full backend suite in both the `/home/claude/fresh` copy and
+  the actual repo working copy that was committed: **39 passed, 0
+  failed** both times. Re-ran `ruff check` on the committed copy: all
+  checks passed.
+
+**Could not verify:** N/A for the core finding — both the bug and the fix
+were demonstrated conclusively via the sleep-widening technique, not just
+reasoned about. Separately noted but **not fixed this pass** (would be a
+second, lower-priority finding diluting focus from the one above): `api.py`'s
+in-memory rate limiter for `/api/run-batch` (`_run_batch_calls`) has the
+same check-then-act shape (`if len(...) >= MAX: raise` then `.append(now)`)
+across the thread pool FastAPI's sync endpoints run on — under real thread
+contention this could let one or two extra calls through the limit
+briefly. This is materially lower-stakes than the pipeline lock (the code
+already documents this limiter as "a minimal in-memory... stand-in" for a
+future Redis-backed limiter, not a hard guarantee like the pipeline lock's
+explicit double-processing-prevention claim), so fixing it is left for a
+future pass rather than expanding this one.
+
+**Commit:** (this commit) — "Bug sweep pass 6 — concurrency: fix a real
+TOCTOU race in the pipeline run-lock (proven via sleep-widening, not
+just reasoned about)"

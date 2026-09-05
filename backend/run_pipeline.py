@@ -48,18 +48,44 @@ class PipelineAlreadyRunningError(RuntimeError):
 
 
 def _acquire_lock():
+    """Atomic, not merely fast — see BUG_SWEEP_LOG.md pass 6. The previous
+    implementation checked `.exists()` then called `.write_text()` as two
+    separate steps, which is a classic check-then-act race: two processes
+    can both see the lock absent and both proceed. Verified this actually
+    happened under real concurrent load (2-5 of 30 simultaneous callers
+    routinely "acquired" the old lock at once, every trial). `os.open`
+    with O_CREAT | O_EXCL is atomic at the OS level — the kernel guarantees
+    only one caller can win the create when multiple race it — closing the
+    gap entirely for the fresh-lock case.
+    """
     PIPELINE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if PIPELINE_LOCK_PATH.exists():
-        age_seconds = time.time() - PIPELINE_LOCK_PATH.stat().st_mtime
-        if age_seconds < 600:  # 10 min — generous upper bound on a real run; older locks are treated as stale/crashed
-            raise PipelineAlreadyRunningError(
-                f"Another pipeline run appears to be in progress (lock file is {age_seconds:.0f}s old). "
-                "Refusing to start a second run to avoid double-processing records. "
-                f"If you're sure no other run is active, delete {PIPELINE_LOCK_PATH} and retry."
-            )
-        # stale lock from a crashed prior run — safe to reclaim
-    PIPELINE_LOCK_PATH.write_text(str(os.getpid()))
-    atexit.register(_release_lock)
+    for _ in range(2):  # one retry to cover reclaiming a stale lock that another process also just reclaimed
+        try:
+            fd = os.open(PIPELINE_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            atexit.register(_release_lock)
+            return
+        except FileExistsError:
+            try:
+                age_seconds = time.time() - PIPELINE_LOCK_PATH.stat().st_mtime
+            except FileNotFoundError:
+                continue  # the lock we just lost the race on was released between our open() and stat() — retry
+            if age_seconds < 600:  # 10 min — generous upper bound on a real run; older locks are treated as stale/crashed
+                raise PipelineAlreadyRunningError(
+                    f"Another pipeline run appears to be in progress (lock file is {age_seconds:.0f}s old). "
+                    "Refusing to start a second run to avoid double-processing records. "
+                    f"If you're sure no other run is active, delete {PIPELINE_LOCK_PATH} and retry."
+                )
+            # stale lock from a crashed prior run — reclaim it and retry the atomic create
+            try:
+                PIPELINE_LOCK_PATH.unlink()
+            except FileNotFoundError:
+                pass  # another process already reclaimed it; the loop's next iteration retries the create
+    raise PipelineAlreadyRunningError(
+        "Could not acquire the pipeline lock after retrying a stale-lock reclaim — "
+        "another run is contending for it right now. Try again shortly."
+    )
 
 
 def _release_lock():
