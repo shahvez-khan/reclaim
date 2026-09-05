@@ -11,7 +11,7 @@ one pass: one category, fully verified, committed.
 | 2 | CI pipeline, exactly as configured | ✅ |
 | 3 | Docker build & run | ❓ |
 | 4 | API input validation & error handling | 🛠️ |
-| 5 | SQL / injection / secrets review | ⬜ |
+| 5 | SQL / injection / secrets review | 🛠️ |
 | 6 | Concurrency & idempotency | ⬜ |
 | 7 | Financial/data-integrity invariants | ⬜ |
 | 8 | Frontend robustness | ⬜ |
@@ -382,3 +382,127 @@ vulnerability.
 **Commit:** (this commit) — "Bug sweep pass 4 — API input validation:
 fix run-batch frontend silently treating 409/429/500 as success, cap
 resolver_note length"
+
+### Pass 5 — SQL / injection / secrets review — 2026-09-04
+
+**Environment notes:** None beyond earlier passes.
+
+**What I checked:**
+
+- **Non-parameterized SQL:** grepped the whole repo for
+  `execute(f"..."`/`.format(`/`% (` patterns used to build SQL. Found four
+  call sites (`decision.py:379`, `execution.py:320`, and two in
+  `backend/tests/test_batch_durability.py`) — all four only use string
+  building to construct the `?` *placeholder count* for a variable-length
+  `IN (...)` clause (e.g. `",".join("?" * len(types))`), with the actual
+  values always passed as bound parameters afterward. Traced `types` back
+  to its single definition in both `decision.py`/`execution.py`: it's a
+  hardcoded default tuple (`("transaction","receivable","abandonment")`)
+  that no caller anywhere overrides — never reachable from any API
+  endpoint or external input. The two test-file cases interpolate literal,
+  hardcoded table names from a fixed tuple, never external input. All four
+  match this project's own documented legitimate pattern (see the ground
+  rules' note about a table/column name from a constrained enum); nothing
+  to fix.
+- Broader sweep of every remaining `cur.execute(`/`conn.execute(` call
+  across `api.py`, `schema.py`, `agent_loop.py`, `decision.py`,
+  `execution.py`, `generate_data.py`, `run_pipeline.py`, `migrate.py` —
+  confirmed every one uses `?` placeholders with values passed as a
+  separate tuple, including `api.py`'s dynamically-built `/api/escalations`
+  query (appends static SQL text conditionally, never the value itself).
+  Specifically re-tested a SQL-injection-style payload
+  (`x'; DROP TABLE transactions; --`) as a real `/api/audit/{id}` path
+  segment (carried over from Pass 4's testing) and confirmed the
+  `transactions` table was untouched.
+- **Secrets:** grepped for `api[_-]?key|secret|password|token|razorpay`
+  across all source, config, and doc files. `RAZORPAY_API_KEY` /
+  `RAZORPAY_WEBHOOK_SECRET` are read in `config.py` but both default to an
+  empty string, are documented (in `.env.example`, `DATA_SOURCES.md`,
+  `execution.py`'s `RazorpayExecutor` docstring) as unused placeholders for
+  a not-yet-implemented integration, and are never non-empty anywhere —
+  confirmed via `git log -p --all -- .env.example`, which shows only ever
+  empty values committed, and confirmed `.env` (the real, filled-in file a
+  developer would create) has never been committed at any point in this
+  repo's history (`git log --all --diff-filter=A --name-only | grep
+  '^\.env$'` → no results).
+- **`.env.example` vs `config.py` sync:** extracted every `VAR=` in
+  `.env.example` and every `os.environ.get("VAR")` in `config.py` and
+  diffed the two sets — **exact match**, no drift in either direction.
+- **Error-response leakage:** checked every exception path for stack
+  traces, file paths, or row-level data reaching the client. The global
+  `Exception` handler and `/api/health`'s handler both correctly log the
+  real error server-side (`logger.exception` / `logger.error`) and return
+  only a generic message to the client — good existing design, confirmed
+  by reading, not just assumed. **Found:** `POST /api/run-batch`'s failure
+  path did the opposite — it logged only `run_id`/`returncode` server-side
+  but put the **full raw subprocess stderr** (up to 2000 chars — a
+  complete Python traceback, including absolute filesystem paths like
+  `/app/backend/run_pipeline.py`, internal module/function names, and
+  library internals) directly into the client-facing HTTP response body.
+- Checked `schema.py`'s table definitions for any sensitive column types
+  (password/SSN/card-number/CVV/secret/token-shaped columns) — none exist;
+  this is a synthetic-data demo with no real PII by design (see
+  `DATA_SOURCES.md`), so there's no row-level sensitive data to leak in the
+  first place.
+
+**Found:**
+1. `.gitignore` has no `.env` entry (only `.env.example`, the safe
+   template, is tracked) — so once someone actually fills in a real
+   `RAZORPAY_API_KEY`/`RAZORPAY_WEBHOOK_SECRET` for the real integration
+   the codebase is explicitly structured to support later (per
+   `execution.py`'s `RazorpayExecutor` docstring and `.env.example`'s own
+   comments), a routine `git add .`/`git add -A` would stage and commit
+   it. `.dockerignore` already excludes `.env` — `.gitignore` was the one
+   gap. No secret has actually been committed to date (confirmed via git
+   history above), but the guard rail that would prevent it from happening
+   the moment someone does the realistic next thing was missing.
+2. `POST /api/run-batch`'s 500 response leaked the full pipeline
+   traceback to the client (see reproduction below) instead of just to
+   the server log — a textbook internal-state-disclosure gap for this
+   category's checklist.
+
+**Fixed:**
+1. Added `.env` to `.gitignore`.
+2. `backend/api.py`'s `run_batch()`: server log now captures the full
+   `result.stderr` (last 4000 chars, extra logging field) on failure; the
+   client-facing `HTTPException` detail is now a generic
+   `"Batch run failed (run_id=...). Check server logs for details."`,
+   correlatable via `run_id` without exposing any internals.
+
+**Verified:**
+- **Proved the `.gitignore` gap first**, per the ground rules: in an
+  isolated scratch git repo, checked out the *old* `.gitignore` (from
+  commit `fa4f4a7`, pre-fix) alongside a real `.env` file with the exact
+  placeholder content `.env.example` documents, and ran `git add -A -n`
+  (dry run) — output included `add '.env'`, confirming it would have been
+  staged. Swapped in the *new* `.gitignore` and re-ran the same dry run —
+  `.env` no longer appears in the output (only `.env.example` and the
+  gitignore file itself do), confirming the fix.
+- **Proved the leakage bug first**, per the ground rules: in the
+  `/home/claude/fresh` test copy, temporarily moved
+  `models/recovery_model.pkl` out of the way, hit `POST /api/run-batch`
+  against the *original* code, and captured the actual HTTP response —
+  it contained the complete raw traceback verbatim, including six
+  absolute `/home/claude/fresh/...` file paths and the exact
+  `FileNotFoundError` message. Applied the fix, restarted the server, and
+  reproduced the *identical* failure again (same missing-model trigger) —
+  this time the client response was
+  `{"error":{"status":500,"message":"Batch run failed (run_id=...). Check
+  server logs for details.","detail":null}}`, no path or traceback content
+  at all. Then confirmed the server's own JSON log line for that same
+  failure still contains the full 1,689-character stderr (including the
+  exact `FileNotFoundError` and path) under a `stderr` field — so nothing
+  was lost for real debugging, it just stopped being sent to the client.
+  Restored the model file after each test.
+- Ran the full backend suite in both the `/home/claude/fresh` copy and the
+  actual repo working copy that was committed: **39 passed, 0 failed**
+  both times. Also re-ran `ruff check .` on the committed copy — all
+  checks passed.
+
+**Could not verify:** N/A for this pass — both findings were reproduced
+and both fixes verified against a real running server and a real (scratch)
+git repository, not just reasoned about.
+
+**Commit:** (this commit) — "Bug sweep pass 5 — SQL/secrets review: add
+.env to .gitignore, stop leaking pipeline tracebacks in run-batch's 500
+response"

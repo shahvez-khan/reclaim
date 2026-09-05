@@ -541,8 +541,21 @@ def run_batch():
         if "PipelineAlreadyRunningError" in result.stderr:
             logger.warning("run_batch_conflict", extra={"run_id": run_id})
             raise HTTPException(status_code=409, detail="A pipeline run is already in progress. Try again shortly.")
-        logger.error("run_batch_failed", extra={"run_id": run_id, "returncode": result.returncode})
-        raise HTTPException(status_code=500, detail=f"run_pipeline.py failed: {result.stderr[-2000:]}")
+        # The full traceback (absolute file paths, internal module/function
+        # names, library internals) goes to the server log only — it used to
+        # be sent verbatim to the client in the HTTP response body, which is
+        # exactly the internal-state leakage this project's own bug-sweep
+        # checklist warns against (see BUG_SWEEP_LOG.md pass 5). Reproduced
+        # for real by forcing a pipeline crash (missing model file) before
+        # fixing this.
+        logger.error(
+            "run_batch_failed",
+            extra={"run_id": run_id, "returncode": result.returncode, "stderr": result.stderr[-4000:]},
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch run failed (run_id={run_id}). Check server logs for details.",
+        )
 
     conn = get_connection()
     new_batch_id = get_current_batch_id(conn)
