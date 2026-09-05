@@ -13,7 +13,7 @@ one pass: one category, fully verified, committed.
 | 4 | API input validation & error handling | 🛠️ |
 | 5 | SQL / injection / secrets review | 🛠️ |
 | 6 | Concurrency & idempotency | 🛠️ |
-| 7 | Financial/data-integrity invariants | ⬜ |
+| 7 | Financial/data-integrity invariants | ✅ |
 | 8 | Frontend robustness | ⬜ |
 | 9 | Test suite quality | ⬜ |
 | 10 | Documentation accuracy | ⬜ |
@@ -611,3 +611,101 @@ future pass rather than expanding this one.
 **Commit:** (this commit) — "Bug sweep pass 6 — concurrency: fix a real
 TOCTOU race in the pipeline run-lock (proven via sleep-widening, not
 just reasoned about)"
+
+### Pass 7 — Financial/data-integrity invariants — 2026-09-05
+
+**Environment notes:** None beyond earlier passes. Used the
+`/home/claude/fresh` copy, which by this point had 10 batches accumulated
+from earlier passes' testing plus 3 more freshly triggered in this pass
+(via real `POST /api/run-batch` calls, not by re-reading old data) — 13
+independent pipeline runs in total to check invariants against, not just
+one.
+
+**What I checked:** Wrote `/tmp/reconcile.py`, which re-derives every
+headline number **directly from raw SQL against the live DB** — not via
+the API or any of the project's own summary-computing code — for every
+batch that has ever run, and checks:
+
+1. **Parts sum to the whole:** blended `total_recovered` ==
+   `txn_recovered + recv_recovered + aband_recovered`, computed
+   independently in the reconciliation script rather than trusting
+   `api.py`'s own arithmetic.
+2. **Recovered never exceeds at-risk**, overall and per record-type
+   (transactions, receivables, abandonments) separately.
+3. **Bucket counts cross-foot exactly** to `total_records`
+   (`recovered + escalated + still_failing + stopped_no_action ==
+   total_records`), independently reconstructing the same bucketing logic
+   `api.py` uses, from raw `decisions`/record rows.
+4. **The escalations table matches `escalate_to_human` decisions
+   exactly**, per record type and per batch — mirroring the exact
+   cross-footing check this project's own history already established
+   elsewhere (per the category's own example).
+5. **No abandonment ever has `recovered_amount` exceeding `cart_value` or
+   negative** — checked directly against all 198 abandonments with a
+   non-null recovered amount across the DB.
+6. **Every record marked `status='recovered'` has at least one real
+   `decisions` row behind it** — no "recovered" status floating free of
+   any decision that could have produced it (checked separately for all
+   three record types).
+7. **`audit_log` cross-foots against `decisions` + `REPLANNED` markers**:
+   for the transaction pipeline specifically (which logs a separate
+   `REPLANNED` audit event in addition to each attempt's outcome event),
+   confirmed `audit_log` count (1048) == `decisions` count (924) +
+   `replanned_count` (124) **exactly**, tracing this from `agent_loop.py`'s
+   actual insert logic rather than just noticing the numbers happened to
+   match.
+8. **Cross-checked `/api/summary`'s actual live JSON response** against
+   the same raw-SQL derivation for one of the freshly-generated batches —
+   `total_at_risk`, `total_recovered`, and `bucket_counts` matched exactly
+   (₹106,795,396.81 at risk, ₹21,784,845.57 recovered, 230/233/265/72
+   summing to 800).
+9. **`/api/baseline` determinism**: the "recomputed fresh each run, not
+   retained per historical batch" phrasing in its own 400 error raised a
+   real question worth checking — does "recomputed fresh" mean the
+   underlying comparison involves live randomness, so two reads of the
+   same current batch could show a stakeholder a different "incremental
+   value" number on a page refresh? Called `/api/baseline` three times in
+   a row for the same current batch: byte-identical JSON every time.
+   "Recomputed fresh" means computed from stored decisions on each read
+   rather than cached, not non-deterministic — confirmed, not just
+   assumed from the wording.
+10. Ran this full reconciliation against all 13 batches, including 3
+    newly triggered via real `POST /api/run-batch` calls during this pass
+    (not just replaying the same historical batches every prior pass had
+    already touched) — every single one reconciled exactly, satisfying
+    this category's "run multiple times, confirm every invariant holds
+    every time" instruction.
+
+**Found:** Nothing. Every invariant held, on every batch checked,
+independently re-derived from raw SQL rather than trusted from the
+project's own computation. One thing I noticed but want to be precise
+about **not** over-claiming as a data-integrity bug: `/api/baseline`'s
+`abandonments.incremental` was negative (-₹33,110) in the batches checked
+— the agent recovered *less* than the simulated baseline for abandonments
+specifically, while doing better for transactions and receivables. This is
+a correctly-computed number (the confidence interval correctly includes
+zero and `recovery_rate_delta_significant` is correctly `false`), not an
+impossible or inconsistent one — it reflects the agent's decision policy
+underperforming baseline for that one record type, which is a product/
+modeling observation, not a violated invariant. Flagging it here for
+visibility rather than silently noticing and moving on, but not treating
+it as a "found" bug for this category — whether the README/DEMO_SCRIPT
+overstate uniform improvement across all three record types belongs to
+Category 10 (documentation accuracy), where I'll check the exact wording
+against this number.
+
+**Fixed:** N/A — no changes made this pass.
+
+**Verified:** All of the above was computed by direct SQL query against
+the live database in a throwaway script, not by reading and trusting the
+application's own summary code, and cross-checked against the live
+`/api/summary` and `/api/baseline` HTTP responses for at least one batch
+to confirm the API layer isn't silently diverging from what's actually in
+the database. Ran the full backend suite once more (no code changed this
+pass): **39 passed, 0 failed**.
+
+**Could not verify:** N/A — this pass was pure verification against live
+data with no environment-dependent gaps.
+
+**Commit:** (this commit) — "Bug sweep pass 7 — financial/data-integrity
+invariants: checked, clean across 13 independent batches"
