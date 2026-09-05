@@ -43,7 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from logging_config import configure_logging
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from schema import get_connection, get_current_batch_id, list_batches
 from stats import two_proportion_diff_ci
 
@@ -236,7 +236,11 @@ def get_escalations(status: str | None = "open"):
 
 
 class ResolveEscalationRequest(BaseModel):
-    resolver_note: str | None = None
+    # max_length guards against an unbounded write to the escalations table —
+    # confirmed unenforced before this fix: a 200KB resolver_note was
+    # accepted and stored verbatim (see BUG_SWEEP_LOG.md pass 4). A human
+    # resolving a queue item writes a sentence or two, not a document.
+    resolver_note: str | None = Field(default=None, max_length=2000)
 
 
 @app.post("/api/escalations/{escalation_id}/resolve")

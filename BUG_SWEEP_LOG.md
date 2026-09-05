@@ -10,7 +10,7 @@ one pass: one category, fully verified, committed.
 | 1 | Fresh-environment reproducibility | ✅ |
 | 2 | CI pipeline, exactly as configured | ✅ |
 | 3 | Docker build & run | ❓ |
-| 4 | API input validation & error handling | ⬜ |
+| 4 | API input validation & error handling | 🛠️ |
 | 5 | SQL / injection / secrets review | ⬜ |
 | 6 | Concurrency & idempotency | ⬜ |
 | 7 | Financial/data-integrity invariants | ⬜ |
@@ -265,5 +265,120 @@ sandbox's raw Python). This category needs an environment with Docker
 available to close out for real — running `docker compose up` once, end to
 end, would settle it.
 
-**Commit:** (this commit) — "Bug sweep pass 3 — Docker build & run:
-thorough static review only, no Docker daemon available in this sandbox"
+**Commit:** 454bbea — "Bug sweep pass 3 — Docker build & run: static
+review only, no Docker daemon available in this sandbox"
+
+### Pass 4 — API input validation & error handling — 2026-09-04
+
+**Environment notes:** None beyond earlier passes. Server run against the
+same `/home/claude/fresh` copy set up in Pass 1 (real DB, real trained
+model), plus the repo working copy itself for the final fix + test run.
+
+**What I checked:** For every endpoint in `api.py`, sent missing/empty
+bodies, wrong-typed fields, out-of-range and nonexistent IDs, empty-string
+IDs, SQL-injection-style path segments, non-ASCII/unicode input, and an
+oversized payload — then, per this category's explicit instruction,
+cross-checked every response shape against what `frontend/app.js` actually
+does with it, since a correct backend error is only real protection if the
+frontend doesn't ignore it.
+
+- `POST /api/escalations/{id}/resolve`: nonexistent/non-numeric/negative
+  IDs all correctly 404. Wrong-typed `resolver_note` (number, array)
+  correctly 422 with a useful Pydantic error body. Unicode/emoji
+  (`已解决 ✅ — résumé`) round-trips exactly. **Found:** a 200KB
+  `resolver_note` was accepted and stored verbatim — no length limit
+  anywhere in the request model.
+- `GET /api/records`: invalid `status`/`record_type` values correctly 400
+  with the exact valid-set listed; nonexistent/empty-string `batch_id`
+  correctly 404; unicode in filters correctly 400, not silently ignored.
+- `GET /api/audit/{record_id}`: nonexistent id → 404; oversized (200-char)
+  id → 400 (existing length guard); SQL-injection-style id (`x'; DROP
+  TABLE transactions; --`) as a real path segment → clean 404, and
+  confirmed via a follow-up query that the `transactions` table still has
+  all 200 rows — parameterized queries hold. Unicode id → clean 404.
+- `GET /api/escalations`, `GET /api/summary`, `GET /api/baseline`: all
+  filter/enum validation already correct and already had before-this-pass
+  coverage; `GET /api/baseline`'s deliberate "only the current batch" 400
+  is not just correctly implemented on the backend — I confirmed
+  `app.js`'s `loadBaselineComparison()` specifically special-cases that
+  exact 400 into a friendly, non-error message, matching the backend's
+  intent precisely. Good existing cross-check, nothing to fix there.
+- **`POST /api/run-batch` → frontend `runBatchBtn` click handler: found and
+  fixed a real bug.** The backend correctly returns 409 (concurrent run
+  already in progress), 429 (rate limit — 3 runs / 60s), or 500 (pipeline
+  crash) via `HTTPException`, all reshaped by the app's global handler into
+  `{"error": {"status", "message", ...}}`. But `app.js`'s click handler did
+  `const data = await res.json()` and used `data.batch_id` **without ever
+  checking `res.ok`** — so on any of those three failure responses,
+  `data.batch_id` was `undefined`, `currentBatchId` silently became `null`,
+  and the handler proceeded to refresh the dashboard and set the button
+  back to "Re-run batch" (its success text) as if the run had actually
+  happened. A user (or two open tabs) triggering the exact concurrency
+  guard verified working in Pass 1 would see no indication whatsoever that
+  their click did nothing.
+
+**Fixed:**
+1. `frontend/app.js`'s `runBatchBtn` handler now checks `res.ok` before
+   trusting the body, parses the `{"error":{"message":...}}` shape the
+   backend actually sends, and throws (routing into the existing `catch`
+   → `"Failed — retry"` button state) instead of silently treating any
+   non-2xx response as success. `currentBatchId` and the rest of the
+   dashboard are now left untouched on failure instead of being reset to
+   `null` and re-fetched with stale/wrong context.
+2. `backend/api.py`'s `ResolveEscalationRequest.resolver_note` now has
+   `max_length=2000` (a Pydantic `Field` constraint) — generous for a
+   human's one-or-two-sentence resolution note, closing the
+   unbounded-write gap found above.
+
+**Verified:**
+- **Proved the frontend bug existed first**, per the ground rules: wrote a
+  Node script (`/tmp/repro_bug.mjs`) that replays the *original*
+  click-handler logic verbatim against the real running server, fired two
+  concurrent `run-batch` calls (the same scenario Pass 1 used to prove the
+  backend's lock works), and confirmed the losing call's `httpStatus: 409`
+  response still produced `wouldShow: "Re-run batch"` (the success text)
+  with the original code — the bug reproduces, not just reasoned about.
+- Re-ran the same replay with the *fixed* logic (`/tmp/verify_fix.mjs`)
+  against the real server: this time a rejected call (429, rate-limited
+  from the repro run moments earlier) correctly produced
+  `finalBtnText: "Failed — retry"` with the specific server message
+  surfaced (`"Rate limit exceeded: max 3 batch runs per 60s..."`) and
+  `currentBatchId` left unchanged — confirming the fix closes the gap for
+  every non-2xx status, not just the one status I happened to trigger in
+  the original repro.
+- Waited out the rate-limit window and re-ran a lone successful call with
+  the fixed logic (`/tmp/verify_success.mjs`) — confirmed the success path
+  is completely unaffected: `finalBtnText: "Re-run batch"`,
+  `currentBatchId` set to the real new batch id.
+- For the `resolver_note` fix: confirmed a 200KB note is now rejected with
+  `422 string_too_long`, and confirmed a normal-length note still resolves
+  the escalation successfully (200, note stored and echoed back exactly).
+- Ran the full backend suite twice — once in the `/home/claude/fresh`
+  copy, once in the actual repo working copy that was committed — **39
+  passed, 0 failed** both times, confirming neither fix broke anything
+  covered by existing tests (none of which happened to exercise this exact
+  gap, which is itself worth knowing for Pass 9).
+
+**Could not verify:** No frontend test suite exists in this project (pure
+backend `pytest`, nothing under a JS test runner), so the frontend fix's
+verification is the Node-script replay above, not an automated regression
+test added to CI — a real browser click-through would be the fullest
+verification, which this sandbox can't do. Also noted, but deliberately
+**not fixed this pass** (would be scope creep beyond one root-caused
+bug per pass): `frontend/app.js`'s `loadHeroExamples()` is the only loader
+in the file with no `try/catch` at all (every sibling loader has one with
+a friendly fallback UI) — if `/api/hero-examples` fails, it's an unhandled
+promise rejection rather than a visible error state. It's low-severity
+(fire-and-forget, doesn't block other sections) and overlaps with Category
+8's charter (frontend robustness) more than this one, so I'm flagging it
+here for that pass rather than fixing it now. Also noted: `label`/`blurb`
+in the same endpoint's frontend render skip the `escapeHtml()` helper used
+everywhere else — but I traced the backend source and confirmed both
+fields are 100%-hardcoded constant strings (never derived from any
+customer/user data), so there's no actual injection path today; flagging
+as a defensive-coding inconsistency for Category 8 rather than a real
+vulnerability.
+
+**Commit:** (this commit) — "Bug sweep pass 4 — API input validation:
+fix run-batch frontend silently treating 409/429/500 as success, cap
+resolver_note length"

@@ -456,6 +456,14 @@ document.getElementById("runBatchBtn").addEventListener("click", async (e) => {
   btn.textContent = "Running…";
   try {
     const res = await fetch(`${API}/api/run-batch`, { method: "POST" });
+    if (!res.ok) {
+      // A 409 (another run already in progress) or 429 (rate limited) or 500
+      // (pipeline crash) all land here — previously this branch was never
+      // taken because nothing checked res.ok, so a rejected run silently
+      // rendered as if it had succeeded (see BUG_SWEEP_LOG.md pass 4).
+      const errBody = await res.json().catch(() => null);
+      throw new Error(errBody?.error?.message || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     currentBatchId = data.batch_id || null;  // pin the dashboard to the freshly-created batch
     await loadBatches();
@@ -465,6 +473,7 @@ document.getElementById("runBatchBtn").addEventListener("click", async (e) => {
     await loadEscalations();
     btn.textContent = "Re-run batch";
   } catch (err) {
+    console.error("run-batch failed:", err.message);
     btn.textContent = "Failed — retry";
   }
   btn.disabled = false;
