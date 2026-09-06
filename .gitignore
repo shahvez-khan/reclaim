@@ -8,3 +8,4 @@ models/*.json
 ml/training_data.csv
 node_modules/
 .env
+.venv/
