@@ -194,7 +194,7 @@ What's hardened, from the production-readiness pass on top of the original hacka
 
 ## Dashboard
 
-Dark navy/blue, Razorpay-adjacent. Shows: total recovered (hero number), transactions/receivables/abandonments recovery rates separately (never blended into one misleading combined figure), a three-way baseline vs. agent comparison, recovery rate by failure code, stopping-rule guardrail counts, a filterable record table (by status and by record type), and per-record audit-trail drill-down. Every panel has a loading state and a retry-on-error state — a failed API call never leaves the UI silently blank.
+Light/dark dual-tone theme (toggle in the header), Razorpay-adjacent. Shows: total recovered (hero number), transactions/receivables/abandonments recovery rates separately (never blended into one misleading combined figure), a three-way baseline vs. agent comparison, recovery rate by failure code, stopping-rule guardrail counts, a filterable record table (by status and by record type), and per-record audit-trail drill-down. Every panel has a loading state and a retry-on-error state — a failed API call never leaves the UI silently blank.
 ## Screenshots
 
 **Overview — hero recovered number, per-category rates, live walkthrough examples**
